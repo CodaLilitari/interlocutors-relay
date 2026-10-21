@@ -1,0 +1,4 @@
+interface:
+  display_name: "Interlocutor's Relay"
+  short_description: "Relay conversation with authorship and source fidelity"
+  default_prompt: "Use $interlocutors-relay to carry this conversation through the designated interlocutor and preserve revisions and delivery state."

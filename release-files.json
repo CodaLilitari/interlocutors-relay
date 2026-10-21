@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "files": [
+    ".gitignore",
+    "CREDITS.md",
+    "LICENSE.md",
+    "LICENSES/Apache-2.0.txt",
+    "LICENSES/CC-BY-4.0.txt",
+    "NOTICE",
+    "README.md",
+    "docs/creative-workflow.md",
+    "docs/process.md",
+    "docs/quickstart.md",
+    "docs/release-checklist.md",
+    "docs/validation.md",
+    "export_release.py",
+    "media_manifest.py",
+    "operator_packet.py",
+    "relay_cli.py",
+    "relay_core.py",
+    "release-files.json",
+    "skills/interlocutors-relay/SKILL.md",
+    "skills/interlocutors-relay/agents/openai.yaml",
+    "skills/interlocutors-relay/references/creative-media.md",
+    "skills/interlocutors-relay/references/protocol.md",
+    "tests/__init__.py",
+    "tests/test_export_release.py",
+    "tests/test_media_manifest.py",
+    "tests/test_operator_packet.py",
+    "tests/test_relay_cli.py",
+    "tests/test_relay_core.py"
+  ]
+}

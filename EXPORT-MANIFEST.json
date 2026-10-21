@@ -1,0 +1,146 @@
+{
+  "files": [
+    {
+      "path": ".gitignore",
+      "sha256": "4eb4a794fc723762a6c6d1807bfcec23ee1ea3cf27b26fc5e595a821b13f29b8",
+      "size_bytes": 67
+    },
+    {
+      "path": "CREDITS.md",
+      "sha256": "e17e80d0d237a74e94cfd9abe60ba4115dfd78f64b9912f775c253ac7ba9da9e",
+      "size_bytes": 1626
+    },
+    {
+      "path": "LICENSE.md",
+      "sha256": "500f622fa23f4945ca84ecd37be43b4a4d7b4787779049b3ddc4e1128211e254",
+      "size_bytes": 1827
+    },
+    {
+      "path": "LICENSES/Apache-2.0.txt",
+      "sha256": "50e6751797c50dedd75ef1b8a0d9e42f5f8472e9fbce91f34718e9f97b0c780a",
+      "size_bytes": 11324
+    },
+    {
+      "path": "LICENSES/CC-BY-4.0.txt",
+      "sha256": "9e5f1b3c610b9c2da5c313bf81d577a7d1acec686bdb0384edefa6df0f90cd94",
+      "size_bytes": 18656
+    },
+    {
+      "path": "NOTICE",
+      "sha256": "34f93f126f180239396549e12e0889613d7e4c756d57fef7913bd68347540799",
+      "size_bytes": 633
+    },
+    {
+      "path": "README.md",
+      "sha256": "d1572da7786e4b1a355bd55e8e4805f99100fe48a02faa60474d0c45464070f9",
+      "size_bytes": 6904
+    },
+    {
+      "path": "docs/creative-workflow.md",
+      "sha256": "daf584822cf73e17b8492d99788ce19dd990ae722ec872983be950ef8a44aaab",
+      "size_bytes": 3798
+    },
+    {
+      "path": "docs/process.md",
+      "sha256": "96a54821c38421f832aebe422c39f6d0bb477bb39a77a9efafa971f2495af8c9",
+      "size_bytes": 6481
+    },
+    {
+      "path": "docs/quickstart.md",
+      "sha256": "32fa040c086bb54a1eb4426943bb3c30a7a7c7334325e838ebcfecf7978156e3",
+      "size_bytes": 3896
+    },
+    {
+      "path": "docs/release-checklist.md",
+      "sha256": "6f4fd01eb958665793f1f1ecb477ef139401aad9bcc9e95ee2967fb9e7dd94ea",
+      "size_bytes": 3109
+    },
+    {
+      "path": "docs/validation.md",
+      "sha256": "6673412a060a052193d971897701d3c18eb77eeda14e9533657b8023bd309ead",
+      "size_bytes": 1905
+    },
+    {
+      "path": "export_release.py",
+      "sha256": "fa00c78ca0a30c9584e9eb006ef66fbc60a78e20a357af615881ff69d31a2b3d",
+      "size_bytes": 18469
+    },
+    {
+      "path": "media_manifest.py",
+      "sha256": "99d92cf72c70b6973253bd8525ca8ab27ad396a36979507b498f5a14092e04bf",
+      "size_bytes": 17599
+    },
+    {
+      "path": "operator_packet.py",
+      "sha256": "3cab0902b133cae9b8a92e5b01966be94511f99d6dfb91d866a6ada50bb94151",
+      "size_bytes": 6345
+    },
+    {
+      "path": "relay_cli.py",
+      "sha256": "1a509b5665c4f4fb2c42ff024d182417ad0ee0db9468e3e237a64a71d5841549",
+      "size_bytes": 4776
+    },
+    {
+      "path": "relay_core.py",
+      "sha256": "07e297a8bfd4c6aeac371052acbbfc7a70dc13fbd256533f44b265e5fdfba01c",
+      "size_bytes": 41697
+    },
+    {
+      "path": "release-files.json",
+      "sha256": "0cf2659a8fc2abfb4ee8b8f62442062f41da86508b3b4aeefe025c0b8e9b8c78",
+      "size_bytes": 879
+    },
+    {
+      "path": "skills/interlocutors-relay/SKILL.md",
+      "sha256": "62ccaa34d499ae89750ecc3ec0ee3769d35cb91e7bdc6c7921675da09e14b90d",
+      "size_bytes": 5197
+    },
+    {
+      "path": "skills/interlocutors-relay/agents/openai.yaml",
+      "sha256": "3929ec26b515e596bf8593c281eac53f5bc6f604aca853360a37e902a7d4c700",
+      "size_bytes": 279
+    },
+    {
+      "path": "skills/interlocutors-relay/references/creative-media.md",
+      "sha256": "176932fb8bcb5839d90d09c1206d9ee75082dda4a885e24793d3fe1ec63d6273",
+      "size_bytes": 1743
+    },
+    {
+      "path": "skills/interlocutors-relay/references/protocol.md",
+      "sha256": "ca93313404b06cd0ba86571e47b612cd44685ca9a24c0f71511448eb2fc8f76e",
+      "size_bytes": 2191
+    },
+    {
+      "path": "tests/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size_bytes": 0
+    },
+    {
+      "path": "tests/test_export_release.py",
+      "sha256": "7f8229be16581efd8abeb24ddb3d6cf0030c7b5026ee27b25f2702d0d33facc7",
+      "size_bytes": 7137
+    },
+    {
+      "path": "tests/test_media_manifest.py",
+      "sha256": "816c1993fec908432443dd8421010c42576c4c45084c605f3ba73fd73c4eb816",
+      "size_bytes": 6473
+    },
+    {
+      "path": "tests/test_operator_packet.py",
+      "sha256": "689f7df7e70e5b3a0c0ebc6e02d8c74e13ac1a03a0c5db8d45ac3afdccbad4d6",
+      "size_bytes": 5603
+    },
+    {
+      "path": "tests/test_relay_cli.py",
+      "sha256": "57e09a3be17c9f83857896c921816b8aa0f61e1b70b48e0b116d16c269a925a9",
+      "size_bytes": 3019
+    },
+    {
+      "path": "tests/test_relay_core.py",
+      "sha256": "bc7cf84af14b86214be30ed39bb5aba5d0f58f4ca3c67098e37fb3782373b46d",
+      "size_bytes": 23301
+    }
+  ],
+  "scan_notice": "defense-in-depth text scan only; reviewed allowlist is the release boundary.",
+  "version": 1
+}

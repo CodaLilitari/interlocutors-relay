@@ -21,23 +21,32 @@ and raises ``MediaManifestError`` if their path binding, file identity,
 content hash, size, type, header dimensions, ID, or alt-text binding differs.
 It does not make a captured record tamper-proof: callers must retain the
 private manifest as a trusted local record.
+
+New captures use manifest version 2, with decimal-string device/inode IDs so
+ordinary JSON handling cannot round them. Verification also accepts original
+version-1 integer identities without rewriting or upgrading the saved record.
 """
 
 from __future__ import annotations
 
 import hashlib
 import os
+import re
 import stat
 import struct
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+from relay_core import ValidationError, _MEDIA_ID, _alt_text, _media
 
 
 MAX_ASSETS = 16
 MAX_ASSET_BYTES = 10 * 1024 * 1024
 MAX_TOTAL_BYTES = MAX_ASSETS * MAX_ASSET_BYTES
 MAX_ALT_TEXT_CHARS = 1_000
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
+_SUPPORTED_MANIFEST_VERSIONS = {1, MANIFEST_VERSION}
+_DECIMAL_ID = re.compile(r"(?:0|-?[1-9][0-9]*)")
 _HASH_CHUNK_BYTES = 64 * 1024
 _WILDCARD_CHARACTERS = frozenset("*?[]")
 _EXTENSIONS = {
@@ -82,6 +91,9 @@ def inspect_media(
         private_assets.append(private)
         public_media.append(public)
 
+    # Use the core's actual contract, rather than a parallel approximation.
+    # Validation preserves exact author text and the supplied media order.
+    _validate_core_media(public_media)
     return {
         "private_manifest": {"version": MANIFEST_VERSION, "assets": private_assets},
         "public_media": public_media,
@@ -112,6 +124,14 @@ def verify_media_manifest(captured: Mapping[str, Any]) -> list[dict[str, Any]]:
         for entry in private_manifest["assets"]
     ]
     observed = inspect_media(source_assets)
+    if private_manifest["version"] == 1:
+        # v1 used JSON integers. Compare those original exact values without
+        # rewriting the caller's receipt or accepting previously rounded IDs.
+        observed["private_manifest"]["version"] = 1
+        for entry in observed["private_manifest"]["assets"]:
+            entry["file_identity"] = {
+                field: int(value) for field, value in entry["file_identity"].items()
+            }
     if observed["private_manifest"] != private_manifest or observed["public_media"] != public_media:
         raise MediaManifestError("captured media manifest no longer matches the exact local files")
     return observed["public_media"]
@@ -135,9 +155,15 @@ def _validate_input_assets(assets: Sequence[Mapping[str, Any]]) -> list[dict[str
     for item in assets:
         if not isinstance(item, Mapping) or set(item) != {"file_id", "path", "alt_text"}:
             raise MediaManifestError("each asset must contain only file_id, path, and alt_text")
-        file_id = _nonempty_text(item["file_id"], "file_id", 256)
+        file_id = item["file_id"]
+        if not isinstance(file_id, str) or not _MEDIA_ID.fullmatch(file_id):
+            raise MediaManifestError("file_id must be an opaque non-path identifier")
         path = _nonempty_text(item["path"], "path", 32_767)
         alt_text = _nonempty_text(item["alt_text"], "alt_text", MAX_ALT_TEXT_CHARS)
+        try:
+            _alt_text(alt_text)
+        except ValidationError as exc:
+            raise MediaManifestError(str(exc)) from exc
         if file_id in file_ids:
             raise MediaManifestError("duplicate file_id is not allowed")
         # Windows paths are ordinarily case-insensitive; normalizing here also
@@ -150,6 +176,13 @@ def _validate_input_assets(assets: Sequence[Mapping[str, Any]]) -> list[dict[str
         paths.add(path_key)
         checked.append({"file_id": file_id, "path": path, "alt_text": alt_text})
     return checked
+
+
+def _validate_core_media(public_media: list[dict[str, Any]]) -> None:
+    try:
+        _media(public_media)
+    except ValidationError as exc:
+        raise MediaManifestError(str(exc)) from exc
 
 
 def _nonempty_text(value: Any, label: str, maximum: int) -> str:
@@ -246,8 +279,10 @@ def _same_file(left: os.stat_result, right: os.stat_result) -> bool:
     return left.st_dev == right.st_dev and left.st_ino == right.st_ino
 
 
-def _identity(file_stat: os.stat_result) -> dict[str, int]:
-    return {"device": int(file_stat.st_dev), "inode": int(file_stat.st_ino)}
+def _identity(file_stat: os.stat_result) -> dict[str, str]:
+    # Device/inode values may exceed JavaScript's exact integer range. Decimal
+    # strings survive ordinary JSON transport through browser/agent tools.
+    return {"device": str(int(file_stat.st_dev)), "inode": str(int(file_stat.st_ino))}
 
 
 def _detect_image(data: bytes) -> tuple[str, int, int]:
@@ -349,10 +384,12 @@ def _valid_dimensions(width: int, height: int, image_type: str) -> tuple[int, in
 def _validate_captured_shape(private_manifest: Any, public_media: Any) -> None:
     if not isinstance(private_manifest, Mapping) or set(private_manifest) != {"version", "assets"}:
         raise MediaManifestError("private_manifest has an unsupported shape")
-    if private_manifest["version"] != MANIFEST_VERSION:
+    version = private_manifest["version"]
+    if type(version) is not int or version not in _SUPPORTED_MANIFEST_VERSIONS:
         raise MediaManifestError("private_manifest version is unsupported")
     if not isinstance(public_media, list):
         raise MediaManifestError("public_media must be an ordered list")
+    _validate_core_media(public_media)
     private_assets = private_manifest["assets"]
     if not isinstance(private_assets, list) or len(private_assets) != len(public_media) or len(private_assets) > MAX_ASSETS:
         raise MediaManifestError("captured asset lists are inconsistent")
@@ -372,10 +409,15 @@ def _validate_captured_shape(private_manifest: Any, public_media: Any) -> None:
                 or hashlib.sha256(public["alt_text"].encode("utf-8")).hexdigest() != private["alt_text_sha256"]):
             raise MediaManifestError("private alt-text binding does not match public media")
         identity = private["file_identity"]
-        if not isinstance(identity, Mapping) or set(identity) != {"device", "inode"} or any(
-            isinstance(value, bool) or not isinstance(value, int) for value in identity.values()
-        ):
+        if not isinstance(identity, Mapping) or set(identity) != {"device", "inode"}:
             raise MediaManifestError("private file identity is invalid")
+        if version == 1:
+            valid_identity = all(type(value) is int for value in identity.values())
+        else:
+            valid_identity = all(isinstance(value, str) and _DECIMAL_ID.fullmatch(value)
+                                 for value in identity.values())
+        if not valid_identity:
+            raise MediaManifestError("private file identity does not match its manifest version")
         if (not isinstance(private["width"], int) or not isinstance(private["height"], int)
                 or private["width"] <= 0 or private["height"] <= 0):
             raise MediaManifestError("private dimensions are invalid")

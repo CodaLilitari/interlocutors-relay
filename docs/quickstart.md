@@ -1,5 +1,7 @@
 # Local quickstart
 
+For the v0.2.0 connected host-agent procedure, start with [the active-session runbook](active-session.md). A directly approved live Page reply has been exercised through that supported-tool workflow; [validation](validation.md) records its scope separately from the local tests. The examples below explain the platform-bound staging core and exact media checks used at the delivery step.
+
 Python 3.11+ and the standard library are sufficient. Run commands from the package directory. Everything below is local; no command sends, posts, authenticates or uploads.
 
 ```powershell
@@ -64,5 +66,7 @@ verify_media_manifest(capture)  # immediately before a separately allowed upload
 ```
 
 `inspect-media --request <private-json-list>` provides the same inspection. Its stdout contains private paths and must remain private. `verify-media --request <captured-json>` expects the inner inspection result, not the CLI's outer `ok/local_only/result` envelope. PNG, JPEG, GIF and WebP headers are supported, bounded to 16 images, 10 MiB each and 160 MiB total. Video and full image decoding are not implemented. Reopening and hashing reduces accidental substitution risk; it cannot freeze a file between the last check and an external uploader's read. Keep the selected bytes stable and verify the actual attachment/result.
+
+New captures use manifest version 2 with decimal-string device/inode identities, so JSON tools retain large values exactly. The verifier also accepts unchanged version 1 integer manifests. Preserve an old receipt as recorded; do not round its numbers or convert it through a lossy JSON implementation. Media identifiers and alt text must satisfy the same contract as the core, and author text is never silently normalized.
 
 An author's text-only reply cannot prove inspection of an image. Return real attachment pixels for visual review, and keep `NEED_ATTACHMENT` when the route cannot deliver them. New crop, overlay, caption, ordering or alt text means a new revision. Runtime files, manifests and packets may contain private data and never belong in a public export.

@@ -8,6 +8,7 @@
     "LICENSES/CC-BY-4.0.txt",
     "NOTICE",
     "README.md",
+    "docs/active-session.md",
     "docs/creative-workflow.md",
     "docs/process.md",
     "docs/quickstart.md",
@@ -18,9 +19,11 @@
     "operator_packet.py",
     "relay_cli.py",
     "relay_core.py",
+    "relay_session.py",
     "release-files.json",
     "skills/interlocutors-relay/SKILL.md",
     "skills/interlocutors-relay/agents/openai.yaml",
+    "skills/interlocutors-relay/references/active-session.md",
     "skills/interlocutors-relay/references/creative-media.md",
     "skills/interlocutors-relay/references/protocol.md",
     "tests/__init__.py",
@@ -28,6 +31,7 @@
     "tests/test_media_manifest.py",
     "tests/test_operator_packet.py",
     "tests/test_relay_cli.py",
-    "tests/test_relay_core.py"
+    "tests/test_relay_core.py",
+    "tests/test_relay_session.py"
   ]
 }

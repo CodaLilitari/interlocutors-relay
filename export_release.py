@@ -75,7 +75,12 @@ _SUSPICIOUS_TEXT_PATTERNS = (
         r"(?im)(?:^\s*|[\"'])(?:x[-_]?api[-_]?key|api[-_]?key)[\"']?\s*[:=]\s*['\"]?[A-Za-z0-9_-]{16,}"
     )),
     ("credential assignment", re.compile(
-        r"(?im)^\s*(?:password|access[_-]?token|refresh[_-]?token|client[_-]?secret|session(?:id|_id)?)\s*[:=]\s*['\"]?[A-Za-z0-9._-]{12,}"
+        r"(?im)^\s*(?:password|access[_-]?token|refresh[_-]?token|client[_-]?secret|session(?:id|_id)?)\s*[:=]\s*"
+        # Quoted values retain the literal-prefix check. For bare values, do
+        # not mistake a full call/subscript receiver for a credential prefix
+        # (commands.add_parser(...) or self.sessions[...]). The first negative
+        # lookahead also prevents backtracking to a partial receiver match.
+        r"(?:['\"][A-Za-z0-9._-]{12,}|[A-Za-z0-9._-]{12,}(?![A-Za-z0-9._-]|[ \t]*[([]))"
     )),
     ("ChatGPT conversation URL", re.compile(r"https?://(?:chatgpt\.com|chat\.openai\.com)/c/[A-Za-z0-9_-]+", re.I)),
     ("Facebook URL", re.compile(r"https?://(?:www\.)?(?:facebook|fb)\.com/[A-Za-z0-9._/?=&%-]+", re.I)),

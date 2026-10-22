@@ -9,6 +9,7 @@ from pathlib import Path
 from relay_core import RelayError, Store
 from media_manifest import inspect_media, verify_media_manifest
 from operator_packet import render_operator_packet
+from relay_session import SessionStore, apply_session_request
 
 
 METHODS = {
@@ -16,7 +17,6 @@ METHODS = {
     "revoke_authority", "begin_delivery", "record_outcome", "reconcile",
     "inspect", "recover",
 }
-
 
 def apply_request(store, request):
     if not isinstance(request, dict) or set(request) - {"method", "arguments"}:
@@ -62,6 +62,14 @@ def main(argv=None):
     apply = commands.add_parser("apply", help="record one local JSON request; never executes externally")
     apply.add_argument("--db", required=True, help="private shared SQLite path, outside release folder")
     apply.add_argument("--request", required=True, help="exact UTF-8 JSON request file")
+    session = commands.add_parser("session", help="record or inspect a resumable operator session; never sends by itself")
+    session.add_argument("--db", required=True, help="private shared SQLite path, outside release folder")
+    session.add_argument("--request", required=True, help="JSON method and arguments for SessionStore")
+    session_packet = commands.add_parser("session-packet", help="render the next supported-tool step or an author/result packet")
+    session_packet.add_argument("--db", required=True)
+    session_packet.add_argument("--session", required=True)
+    session_packet.add_argument("--mode", choices=["intake", "next", "result"], default="next")
+    session_packet.add_argument("--result", help="result ID, required with --mode result")
     packet = commands.add_parser("packet", help="render a minimized local review or operator packet")
     packet.add_argument("--db", required=True)
     packet.add_argument("--case", required=True)
@@ -82,6 +90,20 @@ def main(argv=None):
         elif args.command == "packet":
             store = Store(args.db)
             result = render_operator_packet(store, args.case, args.revision, args.mode)
+        elif args.command == "session-packet":
+            store = SessionStore(args.db)
+            if args.mode == "intake":
+                result = store.author_intake_packet(args.session)
+            elif args.mode == "result":
+                if not args.result:
+                    raise ValueError("--result is required with --mode result")
+                result = store.return_result_packet(args.session, args.result)
+            else:
+                result = store.next_step_packet(args.session)
+        elif args.command == "session":
+            request = json.loads(Path(args.request).read_text(encoding="utf-8-sig"))
+            store = SessionStore(args.db)
+            result = apply_session_request(store, request)
         else:
             request = json.loads(Path(args.request).read_text(encoding="utf-8-sig"))
             store = Store(args.db)

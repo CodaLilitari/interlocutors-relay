@@ -39,6 +39,8 @@ Respond to the actual conversation. Avoid repetitive unsolicited material, dupli
 
 ## Runtime boundary
 
+For a repeatable active-session relay, follow [the active-session runbook](references/active-session.md). Use the configured companion runtime's `session` and `session-packet` commands to preserve source intake, actual author turns, dispositions, explicit selections and returned results while you carry them through supported tools. Perform the next applicable step; do not merely hand the packet back to the human. A one-way receipt can close after verified send without demanding an artificial reply. Keep the human-readable exchange short and machine bookkeeping local.
+
 The companion Python core is optional for manual use. When used, keep its database private and all cooperating writers on the same database. Its local attestations and `newly_claimed` signal are not an authenticated executor permit. It cannot verify accounts, message origins or live rendering. Do not claim a live integration from offline tests.
 
 Keep content state, action authority and execution state separately visible. Actor/target fidelity, candidate selection and no-blind-retry behavior are correctness requirements even during full-access development; later least-privilege hardening does not replace them.

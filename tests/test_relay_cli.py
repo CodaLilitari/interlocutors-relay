@@ -65,6 +65,55 @@ class RelayCliTests(unittest.TestCase):
             self.assertEqual(status, 2)
             self.assertFalse(json.loads(error.getvalue())['ok'])
 
+    def test_session_cli_persists_context_and_refuses_duplicate_dispatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = str(root / 'session.sqlite')
+            request = root / 'request.json'
+
+            def call(method, arguments, expected=0):
+                request.write_text(json.dumps({'method': method, 'arguments': arguments}), encoding='utf-8')
+                output, error = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(error):
+                    status = main(['session', '--db', db, '--request', str(request)])
+                self.assertEqual(status, expected, error.getvalue())
+                return json.loads(output.getvalue() if status == 0 else error.getvalue())
+
+            call('create_session', {'session_id': 's', 'author_route': 'synthetic-saved-thread',
+                 'origin': 'observed', 'source': {'ref': 'synthetic-comment', 'exact_text': 'A question?'},
+                 'context': 'The surrounding exchange.', 'addressee': 'Example author',
+                 'audience': 'private working conversation', 'request': 'Consider the question.'})
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                status = main(['session-packet', '--db', db, '--session', 's', '--mode', 'intake'])
+            self.assertEqual(status, 0)
+            packet = json.loads(output.getvalue())['result']
+            self.assertEqual(packet['source']['exact_text'], 'A question?')
+            self.assertEqual(packet['context'], 'The surrounding exchange.')
+            self.assertEqual(packet['addressee'], 'Example author')
+            self.assertFalse(packet['executes'])
+            call('prepare_turn', {'session_id': 's', 'turn_id': 't', 'exact_message': 'Coda: Consider this question.'})
+            claimed = call('begin_dispatch', {'session_id': 's', 'turn_id': 't', 'attempt_id': 'attempt-1'})
+            self.assertEqual(claimed['result']['host_step'], 'send_once_using_supported_tools')
+            refused = call('begin_dispatch', {'session_id': 's', 'turn_id': 't', 'attempt_id': 'attempt-2'}, 2)
+            self.assertFalse(refused['ok'])
+            resumed = call('next_step_packet', {'session_id': 's'})
+            self.assertEqual(resumed['result']['host_step'], 'reconcile_before_retry')
+
+    def test_session_cli_rejects_unknown_methods_and_missing_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            request = root / 'request.json'
+            request.write_text('{"method":"close"}', encoding='utf-8')
+            for arguments in (
+                ['session', '--db', str(root / 's.sqlite'), '--request', str(request)],
+                ['session-packet', '--db', str(root / 's.sqlite'), '--session', 's', '--mode', 'result'],
+            ):
+                error = io.StringIO()
+                with contextlib.redirect_stderr(error):
+                    self.assertEqual(main(arguments), 2)
+                self.assertFalse(json.loads(error.getvalue())['ok'])
+
 
 if __name__ == "__main__":
     unittest.main()

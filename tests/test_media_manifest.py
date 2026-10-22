@@ -1,11 +1,15 @@
 import copy
 import hashlib
+import json
 import struct
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
-from media_manifest import MediaManifestError, inspect_media, verify_media_manifest
+from media_manifest import MediaManifestError, _identity, inspect_media, verify_media_manifest
+from relay_core import Store
 
 
 def png(width=2, height=3, fill=b""):
@@ -67,6 +71,84 @@ class MediaManifestTests(unittest.TestCase):
         path = self.write("asset.png", png())
         captured = inspect_media([self.asset("asset-1", path, "a synthetic rectangle")])
         self.assertEqual(verify_media_manifest(captured), captured["public_media"])
+
+    def test_invalid_core_ids_and_alt_text_fail_before_reading_files(self):
+        invalid = [
+            ("id with spaces", "valid description"),
+            ("x" * 129, "valid description"),
+            ("C:/synthetic/private/file.png", "valid description"),
+            ("valid-id", "   "),
+            ("valid-id", "line one\r\nline two"),
+            ("valid-id", "\ufeffdescription"),
+        ]
+        for file_id, alt_text in invalid:
+            with self.subTest(file_id=file_id, alt_text=alt_text):
+                with patch("media_manifest._inspect_one") as read_file:
+                    with self.assertRaises(MediaManifestError):
+                        inspect_media([self.asset(file_id, str(self.root / "not-read.png"), alt_text)])
+                    read_file.assert_not_called()
+
+    def test_inspected_and_reverified_media_enters_core_without_text_changes(self):
+        exact_alt_text = "  Violet thread, caf\u00e9.\nA second line.  "
+        path = self.write("asset.png", png())
+        captured = inspect_media([self.asset("a" * 128, path, exact_alt_text)])
+        public_media = verify_media_manifest(captured)
+        store = Store(":memory:")
+        try:
+            store.create_case("media-contract", {
+                "author_route": "synthetic-author", "actor_id": "synthetic-page",
+                "actor_kind": "page", "destination_id": "example-thread",
+                "action": "comment", "context_ref": "synthetic-context",
+            })
+            store.add_revision("media-contract", "r1", "Exact caption", "synthetic-source", media=public_media)
+            stored = store.inspect("media-contract")["revisions"][0]["media"]
+            self.assertEqual(stored, captured["public_media"])
+            self.assertEqual(stored[0]["alt_text"], exact_alt_text)
+        finally:
+            store.close()
+
+    def test_v2_large_file_identity_survives_json_number_round_trip(self):
+        path = self.write("asset.png", png())
+        large_stat = SimpleNamespace(st_dev=2**63 + 123, st_ino=2**60 + 7)
+        # Exercise the real serializer using deterministic large OS identities;
+        # file reads, hashing and subsequent verification still run normally.
+        with patch("media_manifest._identity", side_effect=lambda _: _identity(large_stat)):
+            captured = inspect_media([self.asset("asset-1", path)])
+            self.assertEqual(captured["private_manifest"]["version"], 2)
+            expected = {"device": str(large_stat.st_dev), "inode": str(large_stat.st_ino)}
+            self.assertEqual(captured["private_manifest"]["assets"][0]["file_identity"], expected)
+            # Match the precision of JSON numbers passing through JavaScript.
+            transported = json.loads(json.dumps(captured), parse_int=lambda value: int(float(value)))
+            self.assertEqual(transported, captured)
+            self.assertEqual(verify_media_manifest(transported), captured["public_media"])
+
+    def test_legacy_exact_integer_receipt_is_verified_without_upgrade_or_rounding(self):
+        path = self.write("asset.png", png())
+        large_stat = SimpleNamespace(st_dev=2**63 + 123, st_ino=2**60 + 7)
+        with patch("media_manifest._identity", side_effect=lambda _: _identity(large_stat)):
+            legacy = inspect_media([self.asset("asset-1", path)])
+            legacy["private_manifest"]["version"] = 1
+            identity = legacy["private_manifest"]["assets"][0]["file_identity"]
+            identity.update({field: int(value) for field, value in identity.items()})
+            legacy = json.loads(json.dumps(legacy))
+            original = copy.deepcopy(legacy)
+            self.assertEqual(verify_media_manifest(legacy), legacy["public_media"])
+            self.assertEqual(legacy, original)
+            rounded = json.loads(json.dumps(legacy), parse_int=lambda value: int(float(value)))
+            self.assertNotEqual(rounded, legacy)
+            with self.assertRaises(MediaManifestError):
+                verify_media_manifest(rounded)
+
+    def test_file_identity_encoding_must_match_the_declared_version(self):
+        path = self.write("asset.png", png())
+        captured = inspect_media([self.asset("asset-1", path)])
+        for version, device in [(1, "123"), (1, True), (2, 123), (2, "01"), (2, "+1"), (2, "1e3")]:
+            with self.subTest(version=version, device=device):
+                changed = copy.deepcopy(captured)
+                changed["private_manifest"]["version"] = version
+                changed["private_manifest"]["assets"][0]["file_identity"]["device"] = device
+                with self.assertRaises(MediaManifestError):
+                    verify_media_manifest(changed)
 
     def test_content_swap_and_truncation_fail_reverification(self):
         path = self.write("asset.png", png(2, 3))

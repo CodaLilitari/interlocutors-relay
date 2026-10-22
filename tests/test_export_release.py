@@ -157,6 +157,33 @@ class ExportReleaseTests(unittest.TestCase):
         with self.assertRaises(ReleaseExportError):
             self.export("account")
 
+    def test_credential_scan_allows_session_call_expressions_in_exported_source(self):
+        expressions = [
+            'session = commands.add_parser("session")',
+            'session = self.inspect(session_id)',
+            'session = self._session(session_id)',
+            'session = commands.add_parser ("session")',
+            'session = self.sessions[session_id]',
+        ]
+        source = "\n".join(expressions) + "\n"
+        self.write("runtime.py", source)
+        self.allow(["runtime.py"])
+        result = self.export("session-expressions")
+        self.assertEqual((Path(result["destination"]) / "runtime.py").read_text(encoding="utf-8"), source)
+
+    def test_credential_scan_still_rejects_quoted_and_complete_bare_values(self):
+        # Synthetic literals are assembled so the test file can itself be
+        # exported through the same scanner without carrying a flagged secret.
+        value = "synthetic-" + "credential-value-0123"
+        names = ("password", "access_token", "refresh-token", "client_secret", "session", "session_id")
+        forms = (value, value + " # trailing note", value + ";", value + "/suffix=", '"' + value + '"', "'" + value + "'")
+        for index, (name, form) in enumerate((name, form) for name in names for form in forms):
+            with self.subTest(name=name, form=form):
+                self.write("settings.cfg", name + " = " + form + "\n")
+                self.allow(["settings.cfg"])
+                with self.assertRaisesRegex(ReleaseExportError, "credential assignment"):
+                    self.export(f"credential-{index}")
+
 
 if __name__ == "__main__":
     unittest.main()

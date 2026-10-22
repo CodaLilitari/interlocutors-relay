@@ -79,7 +79,7 @@ def _operator_intent(binding: dict[str, Any]) -> dict[str, Any]:
     """Validate delivery-only target scope and return its strict allowlist."""
     action = binding.get("action")
     if action not in _ORIGINAL_POST_ACTIONS | _REPLY_ACTIONS:
-        raise StateError("operator preflight supports only original-post, comment, or reply actions")
+        raise StateError("operator preflight supports only original-post, comment, or reply actions; use action-packet for other action plans")
     if "reply_parent_id" not in binding:
         raise StateError("operator preflight requires an explicit reply_parent_id")
 

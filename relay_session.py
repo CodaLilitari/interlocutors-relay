@@ -21,6 +21,7 @@ from relay_core import ConflictError, NotFoundError, StateError, ValidationError
 
 DISPOSITIONS = {
     "REPLY", "REACT", "SHARE", "SHARE_WITH_COMMENTARY", "ORIGINAL_POST", "IMAGE",
+    "MESSAGE", "BLOCK", "FRIEND_REQUEST",
     "NEED_CONTEXT", "NEED_RESEARCH", "HOLD", "QUIET", "DISAGREE",
 }
 NON_OUTPUT = {"NEED_CONTEXT", "NEED_RESEARCH", "HOLD", "QUIET", "DISAGREE"}
@@ -28,9 +29,20 @@ SESSION_METHODS = {
     "create_session", "prepare_turn", "begin_dispatch", "record_sent",
     "mark_uncertain", "reconcile_dispatch", "record_response", "select_candidate",
     "record_result", "reconcile_result", "observe_followup", "inspect", "author_intake_packet",
-    "next_step_packet", "return_result_packet", "export_to_core_request",
+    "next_step_packet", "return_result_packet", "export_to_core_request", "export_to_action_request",
 }
 PACKET_SCHEMA = "interlocutors-relay/session-packet/v1"
+_DISPOSITION_ACTIONS = {
+    "REPLY": {"reply", "comment", "message"},
+    "MESSAGE": {"message"},
+    "ORIGINAL_POST": {"post", "original_post"},
+    "IMAGE": {"post", "original_post", "reply", "comment", "message"},
+    "REACT": {"react"},
+    "SHARE": {"share"},
+    "SHARE_WITH_COMMENTARY": {"share_with_commentary"},
+    "BLOCK": {"block"},
+    "FRIEND_REQUEST": {"friend_request"},
+}
 
 
 def _now() -> str:
@@ -475,8 +487,8 @@ class SessionStore:
 
         Core metadata must already exist in attachment ``core_media`` fields.
         This bridge never invents file hashes, platform IDs, authority, or an
-        endorsement. REACT/SHARE candidates remain in the session until a host
-        supplies an appropriate action path; text/media core cannot model them.
+        endorsement. Non-text actions and native platform assets use
+        ``export_to_action_request`` so their selected action data is retained.
         """
         from relay_core import _binding, _media, _text
 
@@ -484,10 +496,11 @@ class SessionStore:
         turn, candidate = self._selection(session)
         disposition = turn["response"]["disposition"]
         actions = {"REPLY": {"reply", "comment"}, "ORIGINAL_POST": {"post", "original_post"},
-                   "IMAGE": {"post", "original_post", "reply", "comment"},
-                   "SHARE_WITH_COMMENTARY": {"share_with_commentary"}}
+                   "IMAGE": {"post", "original_post", "reply", "comment"}}
         if disposition not in actions:
-            raise StateError("this disposition has no text/media core export path; use its session packet")
+            raise StateError("this disposition needs export_to_action_request, not the text/media core bridge")
+        if candidate["action_data"]:
+            raise StateError("selected action_data needs export_to_action_request; the core bridge cannot discard it")
         checked_binding, checked_policy = _binding(binding, {} if account_policy is None else account_policy)
         if checked_binding["action"] not in actions[disposition]:
             raise ValidationError("binding.action conflicts with the selected disposition")
@@ -507,6 +520,42 @@ class SessionStore:
                            {"method": "add_revision", "arguments": {"case_id": case_id,
                             "revision_id": revision_id, "text": text, "media": media, "source_ref": provenance}},
                        ])
+
+    def export_to_action_request(self, session_id: str, action_id: str, action: str,
+                                 actor: dict[str, Any], target: dict[str, Any],
+                                 authority: dict[str, Any], scope: str = "live",
+                                 friend_request_permission: Any = None,
+                                 account_policy: Any = None) -> dict[str, Any]:
+        """Carry a selected action into ActionStore without performing it.
+
+        ActionStore validates the full plan, permissions and observed actor /
+        target fields when the returned create_action request is applied. The
+        host uses that store in the same delivery database as the text core.
+        Native GIF selections remain platform references, never invented file
+        hashes. This request does not claim an operation or grant authority.
+        """
+        session = self.inspect(session_id)
+        turn, candidate = self._selection(session)
+        disposition = turn["response"]["disposition"]
+        _string(action, "action")
+        if action not in _DISPOSITION_ACTIONS.get(disposition, set()):
+            raise ValidationError("action conflicts with the selected disposition")
+        _string(action_id, "action_id")
+        selection = {"session_id": session_id, "turn_id": turn["turn_id"],
+                     "author_route": session["author_route"],
+                     "response_ref": turn["response"]["response_ref"],
+                     "candidate_source_ref": candidate["source_ref"],
+                     "selection_ref": turn["selections"][-1]["selection_ref"]}
+        arguments = {"action_id": action_id, "action": action, "actor": actor,
+                     "target": target, "candidate": candidate, "selection_ref": selection,
+                     "authority": authority, "scope": scope,
+                     "friend_request_permission": friend_request_permission,
+                     "account_policy": account_policy}
+        _json(arguments)
+        return _packet("export_to_action", session, content_state="selected_candidate",
+                       action_authority="supplied_reference_not_authenticated",
+                       execution_state="not_executed",
+                       requests=[{"method": "create_action", "arguments": arguments}])
 
 
 def apply_session_request(store: SessionStore, request: dict[str, Any]) -> Any:

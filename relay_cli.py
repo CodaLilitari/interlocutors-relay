@@ -70,6 +70,12 @@ def main(argv=None):
     session_packet.add_argument("--session", required=True)
     session_packet.add_argument("--mode", choices=["intake", "next", "result"], default="next")
     session_packet.add_argument("--result", help="result ID, required with --mode result")
+    action = commands.add_parser("action", help="record a local action plan or receipt; host tools perform external actions")
+    action.add_argument("--db", required=True, help="same private delivery database used by the text/media core")
+    action.add_argument("--request", required=True, help="JSON method and arguments for ActionStore")
+    action_packet = commands.add_parser("action-packet", help="inspect an action plan and its supported-tool step; never executes it")
+    action_packet.add_argument("--db", required=True, help="same private delivery database used by the text/media core")
+    action_packet.add_argument("--action", required=True)
     packet = commands.add_parser("packet", help="render a minimized local review or operator packet")
     packet.add_argument("--db", required=True)
     packet.add_argument("--case", required=True)
@@ -104,6 +110,15 @@ def main(argv=None):
             request = json.loads(Path(args.request).read_text(encoding="utf-8-sig"))
             store = SessionStore(args.db)
             result = apply_session_request(store, request)
+        elif args.command in ("action", "action-packet"):
+            from relay_actions import ActionStore, apply_action_request
+
+            store = ActionStore(args.db)
+            if args.command == "action-packet":
+                result = store.action_packet(args.action)
+            else:
+                request = json.loads(Path(args.request).read_text(encoding="utf-8-sig"))
+                result = apply_action_request(store, request)
         else:
             request = json.loads(Path(args.request).read_text(encoding="utf-8-sig"))
             store = Store(args.db)

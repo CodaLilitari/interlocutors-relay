@@ -271,5 +271,104 @@ class RelaySessionTests(unittest.TestCase):
         self.assertEqual(self.store.inspect("private")["turns"][0]["state"], "in_flight")
 
 
+    def test_action_bridge_preserves_selected_multimodal_payload_and_source(self):
+        from relay_actions import ActionStore
+
+        examples = [
+            ("MESSAGE", "message", "A short message", {"platform_media": {"kind": "gif", "ref": "selected-gif"}}),
+            ("IMAGE", "message", "", {"platform_media": {"kind": "gif", "ref": "chosen-animation"}}),
+            ("REPLY", "message", "Reply in the same conversation", {}),
+            ("REACT", "react", "", {"reaction": "LOVE"}),
+            ("SHARE", "share", "", {"source_ref": "selected-source-post"}),
+            ("SHARE_WITH_COMMENTARY", "share_with_commentary", "Exact commentary", {"source_ref": "selected-source-post"}),
+            ("BLOCK", "block", "", {"rationale": "Synthetic offline test only"}),
+            ("FRIEND_REQUEST", "friend_request", "", {"rationale": "Specific synthetic recipient"}),
+        ]
+        for index, (disposition, action, text, action_data) in enumerate(examples):
+            with self.subTest(action=action, disposition=disposition):
+                turn = f"choice-{index}"
+                self.send(turn)
+                candidate = {"candidate_id": "chosen", "text": text, "source_ref": "author-choice",
+                             "action_data": action_data}
+                self.answer(disposition, [candidate], turn)
+                self.store.select_candidate("private", turn, "chosen", "explicit-author-selection")
+                actor = {"actor_id": "example-actor", "actor_kind": "profile" if action == "friend_request" else "page",
+                         "source_ref": "active-actor"}
+                target = {"destination_id": "example-target", "surface": "message_thread" if action == "message" else
+                          "profile" if action in {"block", "friend_request"} else "feed_item",
+                          "audience": "private" if action == "message" else "public"}
+                permission = {"approved": True, "granted_by": "user", "actor_id": actor["actor_id"],
+                              "destination_id": target["destination_id"], "rationale": "A specific synthetic contact",
+                              "source_ref": "specific-user-permission"} if action == "friend_request" else None
+                packet = apply_session_request(self.store, {
+                    "method": "export_to_action_request",
+                    "arguments": {"session_id": "private", "action_id": f"action-{index}", "action": action,
+                                  "actor": actor, "target": target,
+                                  "authority": {"source_ref": "actual-user-instruction"}, "scope": "live_test",
+                                  "friend_request_permission": permission},
+                })
+                self.assertFalse(packet["executes"])
+                self.assertEqual(packet["execution_state"], "not_executed")
+                request = packet["requests"][0]
+                self.assertEqual(request["method"], "create_action")
+                arguments = request["arguments"]
+                self.assertEqual(arguments["candidate"]["action_data"], action_data)
+                self.assertEqual(arguments["candidate"]["text"], text)
+                self.assertEqual(arguments["candidate"]["candidate_id"], "chosen")
+                self.assertEqual(arguments["selection_ref"]["turn_id"], turn)
+                self.assertEqual(arguments["selection_ref"]["author_route"], "example-thread")
+                self.assertEqual(arguments["scope"], "live_test")
+                self.assertEqual(arguments["friend_request_permission"], permission)
+                actions = ActionStore(":memory:")
+                try:
+                    created = actions.create_action(**arguments)
+                    self.assertEqual(created["candidate"], arguments["candidate"])
+                    self.assertEqual(created["selection_ref"], arguments["selection_ref"])
+                    self.assertEqual(created["action"], action)
+                    self.assertEqual(actions.inspect(f"action-{index}")["operations"], [])
+                finally:
+                    actions.close()
+                with self.assertRaises(ValidationError):
+                    self.store.export_to_action_request("private", "wrong", "unrelated-action", {}, {}, {})
+
+    def test_legacy_bridge_cannot_discard_share_or_native_media_action_data(self):
+        self.send()
+        self.answer("SHARE_WITH_COMMENTARY", [{
+            "candidate_id": "share", "text": "Exact commentary", "source_ref": "saved-choice",
+            "action_data": {"source_ref": "selected-source-post"},
+        }])
+        self.store.select_candidate("private", "t1", "share", "explicit-selection")
+        with self.assertRaisesRegex(StateError, "export_to_action_request"):
+            self.store.export_to_core_request("private", "case", "rev", {})
+        self.send("gif")
+        self.answer("REPLY", [{
+            "candidate_id": "gif", "text": "Same exact caption", "source_ref": "saved-gif-choice",
+            "action_data": {"platform_media": {"kind": "gif", "ref": "selected-gif"}},
+        }], "gif")
+        self.store.select_candidate("private", "gif", "gif", "explicit-gif-selection")
+        with self.assertRaisesRegex(StateError, "cannot discard"):
+            self.store.export_to_core_request("private", "case", "rev", {})
+
+    def test_action_bridge_requires_selection_and_preserves_exact_friend_permission(self):
+        with self.assertRaises(StateError):
+            self.store.export_to_action_request("private", "action", "friend_request", {}, {}, {})
+        self.send()
+        self.answer("FRIEND_REQUEST", [{
+            "candidate_id": "request", "source_ref": "author-choice",
+            "action_data": {"rationale": "Shared interest and known contact"},
+        }])
+        self.store.select_candidate("private", "t1", "request", "explicit-selection")
+        permission = {"approved": True, "granted_by": "user", "actor_id": "example-user",
+                      "destination_id": "example-target", "rationale": "Shared interest and known contact",
+                      "source_ref": "specific-human-permission"}
+        packet = self.store.export_to_action_request(
+            "private", "request", "friend_request", {}, {}, {"source_ref": "scope"},
+            scope="live_test", friend_request_permission=permission)
+        self.assertEqual(packet["requests"][0]["arguments"]["friend_request_permission"], permission)
+        self.store.prepare_turn("private", "later", "Please reconsider that choice")
+        with self.assertRaises(StateError):
+            self.store.export_to_action_request("private", "stale", "friend_request", {}, {}, {})
+
+
 if __name__ == "__main__":
     unittest.main()

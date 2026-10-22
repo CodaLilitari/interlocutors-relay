@@ -115,5 +115,50 @@ class RelayCliTests(unittest.TestCase):
                 self.assertFalse(json.loads(error.getvalue())['ok'])
 
 
+    def test_action_cli_native_gif_claim_and_uncertainty_use_actual_action_packet(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = str(root / 'delivery.sqlite')
+            request = root / 'request.json'
+
+            def call(method, arguments, expected=0):
+                request.write_text(json.dumps({'method': method, 'arguments': arguments}), encoding='utf-8')
+                output, error = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(error):
+                    status = main(['action', '--db', db, '--request', str(request)])
+                self.assertEqual(status, expected, error.getvalue())
+                return json.loads(output.getvalue() if status == 0 else error.getvalue())
+
+            created = call('create_action', {
+                'action_id': 'gif-message', 'action': 'message',
+                'actor': {'actor_id': 'example-page', 'actor_kind': 'page', 'source_ref': 'observed-active-actor'},
+                'target': {'destination_id': 'example-thread', 'surface': 'message_thread', 'audience': 'private'},
+                'candidate': {'candidate_id': 'gif', 'text': '', 'source_ref': 'author-choice',
+                              'action_data': {'platform_media': {'kind': 'gif', 'ref': 'exact-gif-selection'}}},
+                'selection_ref': 'explicit-selection', 'authority': {'source_ref': 'test-user-scope'},
+                'scope': 'live_test',
+            })
+            self.assertEqual(created['result']['action'], 'message')
+            self.assertEqual(created['result']['candidate']['text'], '')
+            self.assertNotIn('media', created['result']['candidate'])
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(['action-packet', '--db', db, '--action', 'gif-message']), 0)
+            packet = json.loads(output.getvalue())['result']
+            self.assertFalse(packet['executes'])
+            self.assertEqual(packet['host_step'], 'begin_action')
+            claim = call('begin_action', {'action_id': 'gif-message', 'operation_id': 'send-once'})['result']
+            self.assertTrue(claim['newly_claimed'])
+            replay = call('begin_action', {'action_id': 'gif-message', 'operation_id': 'send-once'})['result']
+            self.assertFalse(replay['newly_claimed'])
+            self.assertEqual(replay['host_step'], 'inspect_existing_operation')
+            call('record_outcome', {'operation_id': 'send-once', 'outcome': 'uncertain',
+                                   'evidence': {'observation': 'Synthetic interruption after host step', 'source_ref': 'synthetic-observation'}})
+            resumed = call('action_packet', {'action_id': 'gif-message'})['result']
+            self.assertEqual(resumed['host_step'], 'reconcile_before_retry')
+            self.assertEqual(resumed['record']['candidate']['action_data']['platform_media']['ref'], 'exact-gif-selection')
+            self.assertFalse(call('close', {}, 2)['ok'])
+
+
 if __name__ == "__main__":
     unittest.main()

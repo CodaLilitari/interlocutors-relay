@@ -1,6 +1,10 @@
 # Local quickstart
 
-For the v0.2.0 connected host-agent procedure, start with [the active-session runbook](active-session.md). A directly approved live Page reply has been exercised through that supported-tool workflow; [validation](validation.md) records its scope separately from the local tests. The examples below explain the platform-bound staging core and exact media checks used at the delivery step.
+For the connected host-agent procedure, start with [the active-session runbook](active-session.md). The profile-message and Page workflows described in [validation](validation.md) supply bounded live observations, separate from the local tests. The examples below explain the platform-bound staging core and exact media checks used at the delivery step.
+
+For the v0.3.0 candidate's action companion, use the [action workflow and CLI example](actions.md). It covers local records for messages, reactions, shares and native GIF selection without converting them to text posts. Local record support does not establish live availability of each action. The existing staging core remains available for exact text/local-media endorsement and delivery records.
+
+For non-ad source videos and actual timestamped transcripts, use the [video-intake API and CLI guide](video-intake.md). The host acquires, probes/decodes and transcribes; the local helper records exact artifacts, emits existing session requests, and separates attachment acceptance/submission from actual author inspection.
 
 Python 3.11+ and the standard library are sufficient. Run commands from the package directory. Everything below is local; no command sends, posts, authenticates or uploads.
 

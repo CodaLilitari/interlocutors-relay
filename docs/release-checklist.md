@@ -2,7 +2,7 @@
 
 This is a development checklist, not a certification.
 
-The current source is the v0.2.0 development beta. The active-session agent uses supported host tools for live work; the Python modules remain local state and packet utilities. See [the session workflow](active-session.md) for the complete operating sequence and [validation](validation.md) for the bounded live observations.
+The current source is **v0.3.0 development beta**. This release adds an action companion and its [supported-tool workflow](actions.md). The active-session agent uses supported host tools for live work; the Python modules remain local state and packet utilities. See [the session workflow](active-session.md) for the complete operating sequence and [validation](validation.md) for the bounded live observations.
 
 ## Implemented local components
 
@@ -14,11 +14,14 @@ The current source is the v0.2.0 development beta. The active-session agent uses
 - A reusable operator skill and manual relay packet.
 - An additive `SessionStore` for source/context intake, private and originated work, dispositions, durable message dispatch, response capture, explicit selection, result reconciliation and return/follow-up packets.
 - `session` and `session-packet` CLI commands, including the next-step packet used after interruption. A bridge emits selected text/media requests for the existing core without granting endorsement or authority.
+- `ActionStore`, `action` and `action-packet` retain selected messages, reactions, native platform media, share sources and relationship decisions. The session's action bridge preserves candidate/provenance data, while the existing core bridge rejects action data it cannot retain.
+- Distinct Page/profile records, actor/target-bound plans and observations, one shared core/action operation guard, specific user permission and rationale for friend requests, and exclusion of live block tests.
+- A local video-intake adapter for observed ad exclusion, video/transcript continuity, timestamp and uncertainty validation, existing session requests, and distinct accepted/submitted/inspected records. Host tools supply download, media probing/decoding and transcription; the package does not bundle those runtimes or operate a background client.
 - Exact ordered media-manifest binding, explicit full-bundle endorsement, bounded local image-file checks and minimized non-executing operator packets.
 - Shared media/core input validation and version 2 decimal-string file identities, with explicit verification of exact legacy version 1 manifests.
 - Reviewed text-only export allowlist with integrity manifest and deterministic ZIP output.
 
-The executed suite contains 72 tests: 71 passed and one Windows symlink fixture skipped. The 32-file clean export also passed the suite. Native image delivery and visual review, an original-infographic workflow audit, one directly approved Page reply, and the verified saved return of its delivery receipt have been observed. Broader deployment coverage remains separate from those acceptance results.
+The v0.2.0 release ran 72 tests (71 passed, one Windows symlink fixture skipped) and passed from its 32-file clean export. The action-support baseline ran 91 tests from source and a 36-file clean export. The video module adds 13 tests; the complete suite ran from source and a fresh extraction of a clean 40-file export: 104 tests (103 passed, the same skip), with independent review of the video contract. The updated allowlist contains 40 files. The final interlocutors-relay-v0.3.0.zip contains those 40 source files and its integrity manifest; the accompanying checksum identifies its bytes. The profile-message round trip, further exact private reply, Page reaction/comment and two selected feed reactions have bounded live observations; the initial wrong reaction and its correction remain explicit, and two quiet feed choices were left untouched. Actual video/transcript submission and a reported partial sampled-frame review are observed; the author acknowledged the discrete-frame timing correction. Direct audio listening, continuous-sequence inspection and transcript accuracy remain unverified. A revised author-approved image and exact caption were sent once in a private profile message and reopened with Sent status; the result was carried back to the author, with acknowledgment pending, and no custom alt text was submitted. Native GIF, share and public image-publication tests remain pending; Page messaging is deferred. See validation for the complete evidence scope and preserved earlier history.
 
 ## Required before claiming a live acceptance result
 
@@ -26,6 +29,7 @@ The executed suite contains 72 tests: 71 passed and one Windows symlink fixture 
 - Agree the process with the actual interlocutor; preserve its review and the operator's disposition of recommendations.
 - Record completed source review and verify material findings. Distinguish independent internal code review from the interlocutor's visual/workflow review; do not relabel either as a completed external-provider code audit.
 - Verify private actor IDs, reply targets and exclusions. Display names alone are insufficient. A Page, secondary profile and controller account are separate actors.
+- Observe feature availability for each actor and surface. Return feed/timeline screenshots and incoming messages as scoped source context; preserve exact native asset/share references. Leave an already-selected reaction unchanged and report no action needed. Obtain specific user permission plus rationale for each friend request; do not run live block tests.
 - Run one user-authorized, low-stakes supervised delivery with source, exact payload, actor, target, visible result and timing receipts. A stage-only test is not this test.
 - Exercise the supported-tool workflow from source/context intake through the returned result. Record the actual disposition and selection; include native media when the judgment depends on pixels.
 - Test relevant permission denial, stale context, concurrent cooperation, interruption and reconciliation using the actual supported-tool path without automatic retries. Distinguish synthetic fault tests from live observations.
@@ -35,7 +39,7 @@ The executed suite contains 72 tests: 71 passed and one Windows symlink fixture 
 
 - License and named contributor credit agreed; no invented copyright, Git identity or vendor endorsement.
 - Explicit export file list, integrity manifest and clean-room extraction/test.
-- Include the session module, tests, runbook and skill reference in the export; verify the README commands against the complete source package.
+- Include session/action/video modules, tests, runbooks and skill references in the export; verify the README commands against the complete source package. Preserve the distinction between host-supplied media runtimes and the local video adapter.
 - No private profiles, IDs, historical prose, message logs, DB/WAL files, credentials, local absolute paths or incidental browser content in export.
 - Public documentation describes the tested capability, remaining limits and full-access development status accurately.
 - Record the final test result, live acceptance scope, source revision and release bytes together. Preserve the original v0.1.0 receipt as history.

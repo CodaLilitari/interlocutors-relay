@@ -2,6 +2,8 @@
 
 The host agent carries messages using its supported browser, attachment and saved-conversation tools. `SessionStore` preserves the work between those actions; it does not call a model, open a browser or schedule future runs. The human asks for the conversation to be carried, not for a series of JSON forms to fill out.
 
+For a human-requested recurring timer, use the [reduced-mode runbook](reduced-mode.md). An external host scheduler resumes this same workflow with a small source sample and action budget; it does not change the Python runtime into an inbox listener or enlarge the current account authority.
+
 ## One connected exchange
 
 1. Read the current task and private deployment notes. Reuse the designated saved interlocutor conversation. Identify the material in scope and applicable action authority. Resolve a platform actor and destination only when there is an external action to perform.

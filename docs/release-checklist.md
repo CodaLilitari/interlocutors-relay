@@ -4,6 +4,8 @@ This is a development checklist, not a certification.
 
 The current source is **v0.3.0 development beta**. This release adds an action companion and its [supported-tool workflow](actions.md). The active-session agent uses supported host tools for live work; the Python modules remain local state and packet utilities. See [the session workflow](active-session.md) for the complete operating sequence and [validation](validation.md) for the bounded live observations.
 
+The current source follow-up adds the [reduced-mode runbook](reduced-mode.md) and records later native-GIF, share and six-destination public-image observations in validation. The release counts and pending-test wording below describe the frozen v0.3.0 archive's earlier checkpoint. The new guide brings the current source allowlist to 42 files; it does not configure a timer or add a Python background service.
+
 ## Implemented local components
 
 - Standard-library Python state store with SQLite transactions and explicit revisions.

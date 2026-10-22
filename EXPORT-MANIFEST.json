@@ -32,8 +32,8 @@
     },
     {
       "path": "README.md",
-      "sha256": "0e3b140d7409e13e59fc0a818d1f94971c0615a75ac74a8077454cf406c0ca62",
-      "size_bytes": 14206
+      "sha256": "3b24e6c184b6cee5a7268f72fec89dc4c64d5f20cea1267d114fa228e0085e1c",
+      "size_bytes": 14348
     },
     {
       "path": "docs/active-session.md",
@@ -62,8 +62,8 @@
     },
     {
       "path": "docs/reduced-mode.md",
-      "sha256": "24d0bc936347e557bf9edd6f5d5f7d17b1030f1d181b8aca2434f1314919ca64",
-      "size_bytes": 6574
+      "sha256": "30838a157e4bc016eb88ca8d8f0218c5742cd1e165a282cda73e1a3327eba6ad",
+      "size_bytes": 6884
     },
     {
       "path": "docs/release-checklist.md",
@@ -127,8 +127,8 @@
     },
     {
       "path": "skills/interlocutors-relay/SKILL.md",
-      "sha256": "1b6363ab45e128f28b135c832f5380c9a1ae7b1326fe46c518433d24fba6eba1",
-      "size_bytes": 7641
+      "sha256": "fe1da5d7e948873c47d0da8210ffe331773651261bbd1c716bfe1911d08a8274",
+      "size_bytes": 7806
     },
     {
       "path": "skills/interlocutors-relay/agents/openai.yaml",
@@ -157,8 +157,8 @@
     },
     {
       "path": "skills/interlocutors-relay/references/reduced-mode.md",
-      "sha256": "24d0bc936347e557bf9edd6f5d5f7d17b1030f1d181b8aca2434f1314919ca64",
-      "size_bytes": 6574
+      "sha256": "30838a157e4bc016eb88ca8d8f0218c5742cd1e165a282cda73e1a3327eba6ad",
+      "size_bytes": 6884
     },
     {
       "path": "skills/interlocutors-relay/references/video-intake.md",

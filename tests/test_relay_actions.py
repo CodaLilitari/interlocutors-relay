@@ -271,6 +271,44 @@ class RelayActionTests(unittest.TestCase):
         with self.assertRaises(StateError):
             self.store.begin_action("a1", "op2")
 
+    def test_page_follow_requires_unfollowed_page_and_separate_selected_action(self):
+        page_url = "https://social.example/pages/science"
+        selected = candidate(data={"page_url": page_url})
+        destination = target("page", "public") | {"page_url": page_url, "page_follow_state": "not_following"}
+        for wrong in (destination | {"surface": "profile"}, destination | {"surface": "feed_item"},
+                      destination | {"reply_parent_id": "content-item"},
+                      destination | {"page_follow_state": "following"}, destination | {"page_follow_state": "unknown"},
+                      target("page", "public") | {"page_url": page_url, "page_like_state": "not_liked"},
+                      destination | {"page_url": "https://social.example/pages/other"}):
+            with self.subTest(target=wrong), self.assertRaises(ValidationError):
+                self.create(action="follow_page", selected=selected, destination=wrong)
+        for wrong in (candidate("Caption", {"page_url": page_url}),
+                      candidate(data={"page_url": page_url, "reaction": "LIKE"}),
+                      candidate(data={"page_url": page_url, "like": True})):
+            with self.subTest(candidate=wrong), self.assertRaises(ValidationError):
+                self.create(action="follow_page", selected=wrong, destination=destination)
+        for kind in ("page", "profile"):
+            saved = self.create(kind, "follow_page", acting=actor(kind), selected=selected, destination=destination)
+            self.assertEqual(saved["action"], "follow_page")
+            self.assertEqual(saved["actor"]["actor_kind"], kind)
+
+    def test_page_follow_verifies_following_not_liked_and_never_repeats_claim(self):
+        page_url = "https://social.example/pages/science"
+        self.create(action="follow_page", selected=candidate(data={"page_url": page_url}),
+                    destination=target("page", "public") | {"page_url": page_url, "page_follow_state": "not_following"})
+        self.store.begin_action("a1", "op1")
+        evidence = self.evidence() | {"page_url": page_url, "page_follow_state": "following", "action_taken": True}
+        for wrong in (self.evidence() | {"page_url": page_url, "page_like_state": "liked", "action_taken": True},
+                      evidence | {"page_follow_state": "not_following"}, evidence | {"action_taken": False},
+                      evidence | {"action": "like_page"}, evidence | {"actor_id": "other-actor"},
+                      evidence | {"page_url": "https://social.example/pages/other"}):
+            with self.subTest(evidence=wrong), self.assertRaises(ValidationError):
+                self.store.record_outcome("op1", "verified", wrong)
+        self.store.record_outcome("op1", "verified", evidence)
+        self.assertFalse(self.store.begin_action("a1", "op1")["newly_claimed"])
+        with self.assertRaises(StateError):
+            self.store.begin_action("a1", "op2")
+
     def test_block_can_be_described_but_cannot_dispatch_as_live_test(self):
         self.create(action="block", selected=candidate(), destination=target("profile", "account"), scope="live_test")
         packet = self.store.action_packet("a1")

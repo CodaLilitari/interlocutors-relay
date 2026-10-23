@@ -60,7 +60,7 @@ class RelayUpdateTests(unittest.TestCase):
 
     def git(self, where, *args):
         result = subprocess.run(["git", "-c", "core.hooksPath=", "-C", str(where), *args],
-                                capture_output=True, text=True, check=True)
+                                capture_output=True, text=True, check=True, timeout=30)
         return result.stdout.strip()
 
     def advance(self, value=2):

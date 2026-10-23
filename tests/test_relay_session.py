@@ -367,6 +367,7 @@ class RelaySessionTests(unittest.TestCase):
             ("BLOCK", "block", "", {"rationale": "Synthetic offline test only"}),
             ("FRIEND_REQUEST", "friend_request", "", {"rationale": "Specific synthetic recipient"}),
             ("LIKE_PAGE", "like_page", "", {"page_url": "https://social.example/pages/science"}),
+            ("FOLLOW_PAGE", "follow_page", "", {"page_url": "https://social.example/pages/science"}),
         ]
         for index, (disposition, action, text, action_data) in enumerate(examples):
             with self.subTest(action=action, disposition=disposition):
@@ -379,10 +380,12 @@ class RelaySessionTests(unittest.TestCase):
                 actor = {"actor_id": "example-actor", "actor_kind": "profile" if action == "friend_request" else "page",
                          "source_ref": "active-actor"}
                 target = {"destination_id": "example-target", "surface": "message_thread" if action == "message" else
-                          "profile" if action in {"block", "friend_request"} else "page" if action == "like_page" else "feed_item",
+                          "profile" if action in {"block", "friend_request"} else "page" if action in {"like_page", "follow_page"} else "feed_item",
                           "audience": "private" if action == "message" else "public"}
                 if action == "like_page":
                     target.update(page_url=action_data["page_url"], page_like_state="not_liked")
+                if action == "follow_page":
+                    target.update(page_url=action_data["page_url"], page_follow_state="not_following")
                 permission = {"approved": True, "granted_by": "user", "actor_id": actor["actor_id"],
                               "destination_id": target["destination_id"], "rationale": "A specific synthetic contact",
                               "source_ref": "specific-user-permission"} if action == "friend_request" else None
@@ -417,22 +420,25 @@ class RelaySessionTests(unittest.TestCase):
                 with self.assertRaises(ValidationError):
                     self.store.export_to_action_request("private", "wrong", "unrelated-action", {}, {}, {})
 
-    def test_page_already_liked_returns_observed_state_without_a_dispatch(self):
-        self.send()
-        self.answer("LIKE_PAGE", [{"candidate_id": "page", "source_ref": "author-page-choice",
-                                  "action_data": {"page_url": "https://social.example/pages/science"}}])
-        self.store.select_candidate("private", "t1", "page", "selected-page")
-        result = self.store.record_result(
-            "private", "already-liked", "verified", "Page is already liked by the selected actor. No action performed.",
-            {"page_url": "https://social.example/pages/science", "actor_id": "example-profile",
-             "state": "already_liked", "action_taken": False, "observation_ref": "actual-liked-control"})
-        self.assertEqual(result["disposition"], "LIKE_PAGE")
-        self.assertFalse(result["source_ref"]["action_taken"])
-        self.assertEqual(self.store.return_result_packet("private", "already-liked")["result"], result)
-        with self.assertRaises(ValidationError):
-            self.store.export_to_action_request("private", "wrong", "react", {}, {}, {})
-        with self.assertRaises(ValidationError):
-            self.store.record_result("private", "wrong-pending", "submitted_pending", "Not a publication.", "source")
+    def test_existing_page_relationship_returns_observed_state_without_a_dispatch(self):
+        for disposition, state, wrong_action in (("LIKE_PAGE", "already_liked", "follow_page"),
+                                                 ("FOLLOW_PAGE", "already_following", "like_page")):
+            with self.subTest(disposition=disposition):
+                self.send(state)
+                self.answer(disposition, [{"candidate_id": "page", "source_ref": "author-page-choice",
+                                          "action_data": {"page_url": "https://social.example/pages/science"}}], state)
+                self.store.select_candidate("private", state, "page", "selected-page")
+                result = self.store.record_result(
+                    "private", state, "verified", "Selected relationship already exists for the actor. No action performed.",
+                    {"page_url": "https://social.example/pages/science", "actor_id": "example-profile",
+                     "state": state, "action_taken": False, "observation_ref": "actual-relationship-control"})
+                self.assertEqual(result["disposition"], disposition)
+                self.assertFalse(result["source_ref"]["action_taken"])
+                self.assertEqual(self.store.return_result_packet("private", state)["result"], result)
+                with self.assertRaises(ValidationError):
+                    self.store.export_to_action_request("private", "wrong", wrong_action, {}, {}, {})
+                with self.assertRaises(ValidationError):
+                    self.store.record_result("private", "wrong-pending", "submitted_pending", "Not a publication.", "source")
 
     def test_legacy_bridge_cannot_discard_share_or_native_media_action_data(self):
         self.send()

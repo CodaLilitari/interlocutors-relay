@@ -21,7 +21,7 @@ from relay_core import ConflictError, NotFoundError, StateError, ValidationError
 
 DISPOSITIONS = {
     "REPLY", "REACT", "SHARE", "SHARE_WITH_COMMENTARY", "ORIGINAL_POST", "IMAGE",
-    "MESSAGE", "BLOCK", "FRIEND_REQUEST", "LIKE_PAGE", "MULTIPLE",
+    "MESSAGE", "BLOCK", "FRIEND_REQUEST", "LIKE_PAGE", "FOLLOW_PAGE", "MULTIPLE",
     "NEED_CONTEXT", "NEED_RESEARCH", "HOLD", "QUIET", "DISAGREE",
 }
 NON_OUTPUT = {"NEED_CONTEXT", "NEED_RESEARCH", "HOLD", "QUIET", "DISAGREE"}
@@ -45,6 +45,7 @@ _DISPOSITION_ACTIONS = {
     "BLOCK": {"block"},
     "FRIEND_REQUEST": {"friend_request"},
     "LIKE_PAGE": {"like_page"},
+    "FOLLOW_PAGE": {"follow_page"},
 }
 
 

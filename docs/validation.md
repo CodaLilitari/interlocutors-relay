@@ -1,5 +1,11 @@
 # Validation and limits
 
+## Page Follow selection, 2026-10-23
+
+The source suite ran **176 tests: 175 passed and one Windows symlink fixture skipped**, in 38.994 seconds. One clean 50-file export ran the same suite with the same result in 37.562 seconds. Final runtime/test bytes match that tested export; only documentation receipts changed afterward. Two new regressions distinguish Page Follow eligibility and observed Following from Like or another actor/Page. Existing bridge and no-op tests now cover both Page relationship types, rejecting automatic conversion between them. The updater fixture's Git helper now has a 30-second child-process deadline; test scratch and bytecode handling are kept outside the source checkout during validation.
+
+`FOLLOW_PAGE` / `follow_page` requires an explicit author choice, exact Page URL/identity, acting account and observed `not_following` state. An existing Following state returns an `already_following` no-op without dispatch; an actual mutation requires a bound Following receipt. This is local capability support, not evidence that a live follow was performed. The separate Page Like path and its 174-test checkpoint remain intact.
+
 ## Page Like selection, 2026-10-23
 
 The source suite ran **174 tests: 173 passed and one Windows symlink fixture skipped**, in 31.274 seconds. A clean 50-file export ran the same suite with the same result in 31.358 seconds. Final runtime/test bytes match that tested export; subsequent edits only record documentation evidence. Three new regressions exercise distinct Page Like targets and observed unliked state, rejection of Follow/content-reaction substitutions or mismatched result bindings, and an already-liked no-op receipt. The existing cross-module bridge test now carries a `LIKE_PAGE` selection unchanged into `ActionStore`. An independent operator reviewed the runtime diff and the Page Like workflow. These are synthetic local checks and a bounded code/workflow review; no live Page Like availability or account mutation is claimed by them.

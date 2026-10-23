@@ -1,5 +1,13 @@
 # Validation and limits
 
+## Combined result receipts, 2026-10-23
+
+The source suite now runs **171 tests: 170 passed and one Windows symlink fixture skipped**, completing in 49.350 seconds. A clean 50-file export passed the same suite in 38.998 seconds; final runtime/test bytes match that tested export. Eight new session regressions cover actual saved receipts that return several distinct outcomes. `record_result_return` appends evidence links to the existing verified transport; it never sends another message or changes the original result, turn text, state or history. The host must verify that the saved receipt actually reports each linked result.
+
+Dispatch-time result snapshots prevent a later result from being attributed to an earlier receipt even when host clock ticks are equal. Historical receipts require unambiguous earlier chronology. Newly reconciled evidence never inherits an older result's return links. If a duplicate direct return draft was prepared before the actual earlier receipt was linked, next-step guidance requests explicit inspection and dispatch refuses it; in-flight or uncertain transport still requires its own reconciliation. Independent review reproduced that ordering gap, and the correction passed the original counterexample and three targeted regressions.
+
+In the private live ledger, five outcomes were linked to their already observed saved combined/context receipts: an unavailable Page-message route, two image-publication results and two reactions. No new message was sent for those links, and all original turn/result documents remained unchanged. The session now requests observation of the existing pending publication instead of duplicate returns. This is retrospective linkage of recorded delivery evidence, not a new platform action or a new claim of recipient reading.
+
 ## Pending publication follow-up, 2026-10-23
 
 The source suite ran **163 tests: 162 passed and one Windows symlink fixture skipped**, in 57.301 seconds. A clean 50-file export ran the same suite with the same result in 56.343 seconds. Subsequent changes only update documentation evidence; runtime/test byte identities are checked against that tested export. This extends the earlier 142-test source checkpoint without changing the frozen v0.3.0 archive. The new tests establish local state behavior using synthetic observations; they do not authenticate platform evidence or prove a remote publication.

@@ -1,6 +1,8 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from relay_core import ConflictError, NotFoundError, StateError, Store, ValidationError
 from relay_session import DISPOSITIONS, SessionStore, apply_session_request
@@ -513,6 +515,218 @@ class RelaySessionTests(unittest.TestCase):
         self.assertEqual(result["turn_id"], "t1")
         self.assertEqual(result["candidate"]["candidate_id"], "b")
         self.assertEqual(self.store.inspect("private")["results"][0]["candidate"]["candidate_id"], "a")
+
+    def test_combined_saved_receipt_returns_two_results_without_rewriting_or_resending(self):
+        self.selected()
+        self.store.record_result("private", "first", "verified", "First selected result.", "first-result-ref")
+        self.store.select_candidate("private", "t1", "b", "Second explicit choice")
+        self.store.record_result("private", "second", "verified", "Second selected result.", "second-result-ref")
+        self.store.prepare_turn("private", "combined", "Coda: Actual first and second results together.",
+                                purpose="continuation", expects_response=False)
+        self.store.begin_dispatch("private", "combined", "combined-attempt")
+        self.store.record_sent("private", "combined", "saved-combined-message", "Exact combined message reopened.")
+        before = self.store.inspect("private")
+        self.assertEqual(self.store.next_step_packet("private")["result_id"], "second")
+        first_link = apply_session_request(self.store, {"method": "record_result_return", "arguments": {
+            "session_id": "private", "result_id": "first", "turn_id": "combined",
+            "source_ref": {"message": "saved-combined-message", "observation": "First result appears exactly."}}})
+        self.assertEqual(self.store.next_step_packet("private")["result_id"], "second")
+        second_link = self.store.record_result_return("private", "second", "combined", "second-exact-return-observation")
+        self.assertEqual(second_link["sent_message_ref"], "saved-combined-message")
+        self.assertEqual(second_link["attempt_id"], "combined-attempt")
+        self.assertEqual(self.store.next_step_packet("private")["host_step"], "complete_without_response")
+        packet = self.store.return_result_packet("private", "second")
+        self.assertEqual(packet["return_turn"], before["turns"][-1])
+        self.assertEqual(packet["return_evidence"], [second_link])
+        self.assertEqual(packet["host_step"], "resume_existing_return_turn")
+        after = self.store.inspect("private")
+        self.assertEqual(after["turns"], before["turns"])
+        self.assertEqual(after["results"], before["results"])
+        # Exact repeats return the original evidence timestamp and do not append.
+        self.assertEqual(self.store.record_result_return("private", "first", "combined",
+                         {"observation": "First result appears exactly.", "message": "saved-combined-message"}), first_link)
+        self.assertEqual(self.store.inspect("private"), after)
+        self.store.record_result_return("private", "first", "combined", "additional-independent-readback")
+        observations = self.store.inspect("private")["result_returns"]
+        self.assertEqual(observations[:2], [first_link, second_link])
+        self.assertEqual(len(observations), 3)
+        self.store.close()
+        self.store = SessionStore(self.path)
+        self.assertEqual(self.store.next_step_packet("private")["host_step"], "complete_without_response")
+        for result_id in ("first", "second"):
+            with self.subTest(result_id=result_id), self.assertRaises(StateError):
+                self.store.prepare_turn("private", "duplicate", "No second send.",
+                                        purpose="return_result", result_id=result_id)
+
+    def test_combined_pending_receipt_does_not_return_later_resolution(self):
+        self.selected()
+        self.store.record_result("private", "pending", "submitted_pending", "Exact comment persists as Pending.", "pending-ref")
+        self.store.select_candidate("private", "t1", "b", "Selected other choice")
+        self.store.record_result("private", "other", "verified", "Other result observed.", "other-ref")
+        self.store.prepare_turn("private", "combined", "Coda: One publication pending; other result verified.",
+                                purpose="continuation", expects_response=False)
+        self.store.begin_dispatch("private", "combined", "combined-attempt")
+        self.store.record_sent("private", "combined", "saved-combined", "Observed combined receipt.")
+        for result_id in ("pending", "other"):
+            self.store.record_result_return("private", result_id, "combined", f"actual-return-{result_id}")
+        packet = self.store.next_step_packet("private")
+        self.assertEqual(packet["host_step"], "observe_pending_publication")
+        self.assertEqual(packet["pending_publications"][0]["outcome"], "submitted_pending")
+        self.assertEqual(self.store.return_result_packet("private", "pending")["execution_state"], "submitted_pending")
+        resolved = self.store.reconcile_result("private", "pending", "published", "verified", "Now visibly published.", "published-ref")
+        self.assertNotIn("return_evidence", resolved)
+        self.assertNotIn("result_returns", resolved)
+        self.assertEqual(self.store.next_step_packet("private")["result_id"], "published")
+        unreturned = self.store.return_result_packet("private", "published")
+        self.assertIsNone(unreturned["return_turn"])
+        self.assertEqual(unreturned["return_evidence"], [])
+        self.assertEqual(unreturned["host_step"], "prepare_return_turn")
+        with self.assertRaisesRegex(StateError, "before.*dispatch began"):
+            self.store.record_result_return("private", "published", "combined", "cannot-return-future-evidence")
+        self.assertEqual(len(self.store.inspect("private")["result_returns"]), 2)
+        self.store.prepare_turn("private", "resolution", "Coda: Actual newly observed publication.",
+                                purpose="return_result", result_id="published", expects_response=False)
+        self.store.begin_dispatch("private", "resolution", "resolution-attempt")
+        self.store.record_sent("private", "resolution", "saved-resolution", "Observed resolution receipt.")
+        self.assertEqual(self.store.next_step_packet("private")["host_step"], "complete_without_response")
+        self.assertEqual(self.store.return_result_packet("private", "published")["return_turn"]["turn_id"], "resolution")
+
+    def test_result_return_requires_verified_transport_and_exact_session_objects(self):
+        self.selected()
+        self.store.record_result("private", "result", "verified", "Selected result.", "result-ref")
+        self.store.prepare_turn("private", "receipt", "Coda: Exact result receipt.", purpose="continuation")
+        with self.assertRaises(StateError):
+            self.store.record_result_return("private", "result", "receipt", "prepared-is-not-sent")
+        self.store.begin_dispatch("private", "receipt", "attempt-one")
+        with self.assertRaises(StateError):
+            self.store.record_result_return("private", "result", "receipt", "in-flight-is-not-verified")
+        self.store.mark_uncertain("private", "receipt", "UI timeout.")
+        with self.assertRaises(StateError):
+            self.store.record_result_return("private", "result", "receipt", "uncertain-is-not-verified")
+        self.store.reconcile_dispatch("private", "receipt", "not_sent", "Positive unchanged unsent composer.")
+        with self.assertRaises(StateError):
+            self.store.record_result_return("private", "result", "receipt", "not-sent-is-not-returned")
+        self.store.begin_dispatch("private", "receipt", "attempt-two")
+        self.store.record_sent("private", "receipt", "saved-receipt", "Observed exact receipt in saved history.")
+        self.store.create_session("other", "other-route", "originated", "A separate conversation.")
+        for session_id, result_id, turn_id in (("missing", "result", "receipt"),
+                                               ("other", "result", "receipt"),
+                                               ("private", "missing", "receipt"),
+                                               ("private", "result", "missing")):
+            with self.subTest(session=session_id, result=result_id, turn=turn_id), self.assertRaises(NotFoundError):
+                self.store.record_result_return(session_id, result_id, turn_id, "wrong-binding")
+        for source_ref in (None, " ", {}, []):
+            with self.subTest(source_ref=source_ref), self.assertRaises(ValidationError):
+                self.store.record_result_return("private", "result", "receipt", source_ref)
+        self.assertEqual(self.store.inspect("private")["result_returns"], [])
+        linked = self.store.record_result_return("private", "result", "receipt", "exact-saved-result-readback")
+        self.assertEqual(linked["attempt_id"], "attempt-two")
+        self.assertEqual(self.store.next_step_packet("private")["host_step"], "retrieve_author_response")
+        self.answer("QUIET", turn="receipt")
+        self.assertEqual(self.store.record_result_return("private", "result", "receipt", "exact-saved-result-readback"), linked)
+        self.store.record_result_return("private", "result", "receipt", "author-response-confirms-receipt")
+        self.assertEqual(self.store.next_step_packet("private")["host_step"], "respect_disposition")
+        self.assertEqual(self.store.return_result_packet("private", "result")["return_turn"]["state"], "responded")
+
+    def test_result_return_cannot_attest_result_recorded_after_the_receipt(self):
+        self.selected()
+        # Coarse host timestamps can be equal even though the result was later.
+        with patch("relay_session._now", return_value="2030-01-01T12:00:00Z"):
+            self.store.prepare_turn("private", "earlier", "Coda: Earlier message contains no future result.",
+                                    purpose="continuation", expects_response=False)
+            self.store.begin_dispatch("private", "earlier", "earlier-attempt")
+            self.store.record_sent("private", "earlier", "saved-earlier", "Observed earlier message.")
+            self.store.record_result("private", "later-result", "verified", "Later observed result.", "later-ref", turn_id="t1")
+        with self.assertRaisesRegex(StateError, "before.*dispatch began"):
+            self.store.record_result_return("private", "later-result", "earlier", "chronologically-impossible")
+        self.assertEqual(self.store.inspect("private")["result_returns"], [])
+        self.assertEqual(self.store.next_step_packet("private")["result_id"], "later-result")
+
+    def test_historical_turn_without_dispatch_snapshot_needs_strict_chronology(self):
+        self.selected()
+        with patch("relay_session._now", return_value="2030-01-01T12:00:00Z"):
+            self.store.record_result("private", "earlier-result", "verified", "Observed before receipt.", "earlier-ref")
+        with patch("relay_session._now", return_value="2030-01-01T12:00:01Z"):
+            self.store.prepare_turn("private", "legacy", "Coda: Actual historical result.",
+                                    purpose="continuation", expects_response=False)
+            self.store.begin_dispatch("private", "legacy", "legacy-attempt")
+            self.store.record_sent("private", "legacy", "saved-legacy", "Observed old receipt.")
+            self.store.record_result("private", "equal-time-result", "verified", "Order unclear at coarse timestamp.", "ambiguous-ref", turn_id="t1")
+        # Seed the exact historical shape: older deployments did not store the
+        # dispatch result snapshot. No receipt or result payload is rewritten.
+        legacy = self.store.inspect("private")["turns"][-1]
+        del legacy["attempts"][-1]["result_ids_at_dispatch"]
+        self.store._db.execute("UPDATE relay_session_turns SET document=? WHERE session_id=? AND turn_id=?",
+                               (json.dumps(legacy), "private", "legacy"))
+        evidence = self.store.record_result_return("private", "earlier-result", "legacy", "historical-readback")
+        self.assertEqual(evidence["sent_message_ref"], "saved-legacy")
+        with self.assertRaisesRegex(StateError, "chronology is ambiguous"):
+            self.store.record_result_return("private", "equal-time-result", "legacy", "cannot-prove-order")
+        self.assertEqual(self.store.inspect("private")["result_returns"], [evidence])
+
+    def queued_return_after_unlinked_saved_receipt(self):
+        self.selected()
+        self.store.record_result("private", "result", "verified", "Observed result.", "result-ref")
+        self.store.prepare_turn("private", "combined", "Coda: The actual result was returned here.",
+                                purpose="continuation", expects_response=False)
+        self.store.begin_dispatch("private", "combined", "combined-attempt")
+        self.store.record_sent("private", "combined", "saved-combined", "Observed actual saved receipt.")
+        self.store.prepare_turn("private", "queued", "Coda: This draft would repeat that same result.",
+                                purpose="return_result", result_id="result", expects_response=False)
+
+    def test_late_receipt_link_stops_prepared_duplicate_without_changing_draft(self):
+        self.queued_return_after_unlinked_saved_receipt()
+        draft = self.store.inspect("private")["turns"][-1]
+        self.assertEqual(self.store.next_step_packet("private")["host_step"], "begin_dispatch")
+        evidence = self.store.record_result_return("private", "result", "combined", "late-exact-readback")
+        step = self.store.next_step_packet("private")
+        self.assertEqual(step["host_step"], "inspect_redundant_return_turn")
+        self.assertEqual(step["execution_state"], "prepared")
+        self.assertFalse(step["output_required"])
+        self.assertFalse(step["executes"])
+        self.assertEqual(step["turn"], draft)
+        self.assertEqual(step["return_evidence"], [evidence])
+        other = SessionStore(self.path)
+        try:
+            with self.assertRaisesRegex(StateError, "already returned"):
+                other.begin_dispatch("private", "queued", "duplicate-attempt")
+        finally:
+            other.close()
+        self.assertEqual(self.store.inspect("private")["turns"][-1], draft)
+        self.assertEqual(self.store.return_result_packet("private", "result")["return_turn"]["turn_id"], "combined")
+
+    def test_late_receipt_link_stops_confirmed_not_sent_retry_without_cancelling_it(self):
+        self.queued_return_after_unlinked_saved_receipt()
+        self.store.begin_dispatch("private", "queued", "first-attempt")
+        self.store.reconcile_dispatch("private", "queued", "not_sent", "Positive unsent composer and saved-history check.")
+        unsent = self.store.inspect("private")["turns"][-1]
+        self.assertEqual(self.store.next_step_packet("private")["host_step"], "begin_new_attempt")
+        self.store.record_result_return("private", "result", "combined", "late-exact-readback")
+        step = self.store.next_step_packet("private")
+        self.assertEqual(step["host_step"], "inspect_redundant_return_turn")
+        self.assertEqual(step["execution_state"], "not_sent")
+        self.assertEqual(step["turn"], unsent)
+        with self.assertRaisesRegex(StateError, "already returned"):
+            self.store.begin_dispatch("private", "queued", "retry-attempt")
+        self.assertEqual(self.store.inspect("private")["turns"][-1], unsent)
+
+    def test_late_receipt_link_does_not_resolve_an_inflight_or_uncertain_duplicate(self):
+        self.queued_return_after_unlinked_saved_receipt()
+        self.store.begin_dispatch("private", "queued", "first-attempt")
+        inflight = self.store.inspect("private")["turns"][-1]
+        self.store.record_result_return("private", "result", "combined", "late-exact-readback")
+        self.assertEqual(self.store.inspect("private")["turns"][-1], inflight)
+        self.assertEqual(self.store.next_step_packet("private")["host_step"], "reconcile_before_retry")
+        self.store.mark_uncertain("private", "queued", "Unknown dispatch outcome remains unknown.")
+        uncertain = self.store.inspect("private")["turns"][-1]
+        self.assertEqual(self.store.next_step_packet("private")["host_step"], "reconcile_before_retry")
+        with self.assertRaises(StateError):
+            self.store.begin_dispatch("private", "queued", "unsafe-retry")
+        self.assertEqual(self.store.inspect("private")["turns"][-1], uncertain)
+        self.store.reconcile_dispatch("private", "queued", "not_sent", "Actual saved-history inspection confirms no second send.")
+        self.assertEqual(self.store.next_step_packet("private")["host_step"], "inspect_redundant_return_turn")
+        with self.assertRaisesRegex(StateError, "already returned"):
+            self.store.begin_dispatch("private", "queued", "still-not-a-retry")
 
     def test_explicit_older_choice_cannot_bypass_pending_author_dispatch(self):
         self.selected()

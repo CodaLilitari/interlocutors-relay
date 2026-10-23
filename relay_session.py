@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from relay_core import ConflictError, NotFoundError, StateError, ValidationError
+from relay_core import ConflictError, NotFoundError, StateError, ValidationError, _zoned_timestamp
 
 
 DISPOSITIONS = {
@@ -30,7 +30,7 @@ _PUBLICATION_DISPOSITIONS = {"REPLY", "ORIGINAL_POST", "IMAGE", "SHARE", "SHARE_
 SESSION_METHODS = {
     "create_session", "prepare_turn", "begin_dispatch", "record_sent",
     "mark_uncertain", "reconcile_dispatch", "record_response", "select_candidate",
-    "record_result", "reconcile_result", "observe_followup", "inspect", "author_intake_packet",
+    "record_result", "reconcile_result", "record_result_return", "observe_followup", "inspect", "author_intake_packet",
     "next_step_packet", "return_result_packet", "export_to_core_request", "export_to_action_request",
 }
 PACKET_SCHEMA = "interlocutors-relay/session-packet/v1"
@@ -120,6 +120,13 @@ class SessionStore:
                 session_id TEXT NOT NULL REFERENCES relay_sessions(session_id),
                 result_id TEXT NOT NULL, document TEXT NOT NULL,
                 UNIQUE(session_id, result_id));
+            CREATE TABLE IF NOT EXISTS relay_session_result_returns (
+                ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL, result_id TEXT NOT NULL,
+                turn_id TEXT NOT NULL, source_ref TEXT NOT NULL, document TEXT NOT NULL,
+                UNIQUE(session_id, result_id, turn_id, source_ref),
+                FOREIGN KEY(session_id, result_id) REFERENCES relay_session_results(session_id, result_id),
+                FOREIGN KEY(session_id, turn_id) REFERENCES relay_session_turns(session_id, turn_id));
         """)
 
     def close(self) -> None:
@@ -196,7 +203,8 @@ class SessionStore:
     def inspect(self, session_id: str) -> dict[str, Any]:
         with self._lock:
             document = self._session(session_id)
-            for key, table in (("turns", "relay_session_turns"), ("results", "relay_session_results")):
+            for key, table in (("turns", "relay_session_turns"), ("results", "relay_session_results"),
+                               ("result_returns", "relay_session_result_returns")):
                 document[key] = [json.loads(row[0]) for row in self._db.execute(
                     f"SELECT document FROM {table} WHERE session_id=? ORDER BY ordinal", (session_id,))]
             return document
@@ -234,7 +242,7 @@ class SessionStore:
             if result_id is not None:
                 if not any(item["result_id"] == result_id for item in session["results"]):
                     raise NotFoundError("result not found for session")
-                if any(item["result_id"] == result_id for item in session["turns"]):
+                if self._result_return_turns(session, result_id):
                     raise StateError("this result already has a return turn; resume it")
             try:
                 self._db.execute("INSERT INTO relay_session_turns(session_id,turn_id,document) VALUES (?,?,?)",
@@ -250,11 +258,16 @@ class SessionStore:
             turn = self._turn(session_id, turn_id)
             if turn["state"] not in {"prepared", "not_sent"}:
                 raise StateError("dispatch already started; inspect and reconcile, do not resend")
+            if self._redundant_return_evidence(self.inspect(session_id), turn):
+                raise StateError("result was already returned by another saved turn; inspect the redundant return turn without dispatching")
             if any(item["attempt_id"] == attempt_id for item in turn["attempts"]):
                 raise ConflictError("retry requires a new attempt_id after a verified not_sent outcome")
             turn["state"] = "in_flight"
             turn["attempts"].append({"attempt_id": attempt_id, "began_at": _now(),
-                                     "state": "in_flight", "observations": []})
+                                     "state": "in_flight", "observations": [],
+                                     "result_ids_at_dispatch": [row[0] for row in self._db.execute(
+                                         "SELECT result_id FROM relay_session_results WHERE session_id=? ORDER BY ordinal",
+                                         (session_id,))]})
             self._save_turn(session_id, turn)
             session = self._session(session_id)
         return _packet("dispatch", session, turn_id=turn_id, attempt_id=attempt_id,
@@ -461,13 +474,94 @@ class SessionStore:
         result = next((item for item in session["results"] if item["result_id"] == result_id), None)
         if result is None:
             raise NotFoundError("result not found for session")
-        returns = [turn for turn in session["turns"] if turn["result_id"] == result_id]
+        returns = self._result_return_turns(session, result_id)
         return _packet("return_result", session, result=result, source=session["source"],
                        context=session["context"], addressee=session["addressee"], audience=session["audience"],
                        content_state="selected_candidate", action_authority=result["action_authority"],
                        execution_state=result["outcome"],
                        return_turn=returns[0] if returns else None,
+                       return_evidence=[item for item in session["result_returns"] if item["result_id"] == result_id],
                        host_step="prepare_return_turn" if not returns else "resume_existing_return_turn")
+
+    @staticmethod
+    def _result_return_turns(session, result_id):
+        # Explicit links attest actual delivery, so prefer them over a planned
+        # direct return turn. Legacy single-result turns retain their behavior.
+        linked = [item["turn_id"] for item in session.get("result_returns", []) if item["result_id"] == result_id]
+        direct = [turn["turn_id"] for turn in session["turns"] if turn["result_id"] == result_id]
+        turns = {turn["turn_id"]: turn for turn in session["turns"]}
+        return [turns[turn_id] for turn_id in dict.fromkeys(linked + direct)]
+
+    @staticmethod
+    def _redundant_return_evidence(session, turn):
+        if turn["purpose"] != "return_result" or turn["state"] not in {"prepared", "not_sent"}:
+            return []
+        return [item for item in session.get("result_returns", [])
+                if item["result_id"] == turn["result_id"] and item["turn_id"] != turn["turn_id"]]
+
+    def record_result_return(self, session_id: str, result_id: str, turn_id: str,
+                             source_ref: Any) -> dict[str, Any]:
+        """Attest that an already observed sent turn returned this exact result.
+
+        One actual combined receipt can return several results. This appends a
+        local evidence link without altering its message, transport history or
+        result. It checks recorded transport and chronology, not whether the
+        message's meaning actually reports the result; the host must inspect
+        that content and supply its observation reference. New reconciliation
+        result IDs never inherit these links.
+        """
+        _string(result_id, "result_id")
+        _string(turn_id, "turn_id")
+        reference = _json(_ref(source_ref, "source_ref"))
+        with self._write():
+            session = self.inspect(session_id)
+            result = next((item for item in session["results"] if item["result_id"] == result_id), None)
+            if result is None:
+                raise NotFoundError("result not found for session")
+            turn = self._turn(session_id, turn_id)
+            if turn["state"] not in {"sent", "closed", "responded"} or not turn.get("sent_message_ref"):
+                raise StateError("result return requires an observed sent message")
+            _ref(turn["sent_message_ref"], "turn.sent_message_ref")
+            attempts = turn.get("attempts", [])
+            attempt = attempts[-1] if attempts else None
+            if attempt is None or attempt["state"] != "sent":
+                raise StateError("result return requires a verified sent dispatch attempt")
+            observations = [item for item in attempt["observations"] if item["outcome"] == "sent"
+                            and item.get("sent_message_ref") == turn["sent_message_ref"]]
+            if not observations:
+                raise StateError("result return requires matching observed send evidence")
+            sent = observations[-1]
+            _ref(sent.get("evidence"), "sent evidence")
+            times = {}
+            for label, value in (("result.recorded_at", result["recorded_at"]),
+                                 ("attempt.began_at", attempt["began_at"]),
+                                 ("sent.observed_at", sent["observed_at"])):
+                _zoned_timestamp(value, label)
+                times[label] = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if not times["result.recorded_at"] <= times["attempt.began_at"] <= times["sent.observed_at"]:
+                raise StateError("result must be recorded before the observed receipt's dispatch began")
+            snapshot = attempt.get("result_ids_at_dispatch")
+            if snapshot is None:
+                # Historical attempts predate the snapshot. Equal timestamps
+                # cannot prove order on hosts whose wall clock has coarse ticks.
+                if times["result.recorded_at"] == times["attempt.began_at"]:
+                    raise StateError("historical result chronology is ambiguous at the dispatch timestamp")
+            elif not isinstance(snapshot, list) or result_id not in snapshot:
+                raise StateError("result must exist before the observed receipt's dispatch began")
+            existing = self._db.execute(
+                "SELECT document FROM relay_session_result_returns WHERE session_id=? AND result_id=? AND turn_id=? AND source_ref=?",
+                (session_id, result_id, turn_id, reference)).fetchone()
+            if existing is not None:
+                return json.loads(existing["document"])
+            observation = {"session_id": session_id, "result_id": result_id, "turn_id": turn_id,
+                           "source_ref": source_ref, "recorded_at": _now(),
+                           "sent_message_ref": turn["sent_message_ref"], "attempt_id": attempt["attempt_id"],
+                           "result_recorded_at": result["recorded_at"], "dispatch_began_at": attempt["began_at"],
+                           "sent_observed_at": sent["observed_at"]}
+            self._db.execute(
+                "INSERT INTO relay_session_result_returns(session_id,result_id,turn_id,source_ref,document) VALUES (?,?,?,?,?)",
+                (session_id, result_id, turn_id, reference, _json(observation)))
+            return observation
 
     def observe_followup(self, parent_session_id: str, parent_result_id: str, session_id: str,
                          source: Any, context: str, request: str, addressee: Any = None,
@@ -497,6 +591,10 @@ class SessionStore:
         steps = {"prepared": "begin_dispatch", "not_sent": "begin_new_attempt",
                  "in_flight": "reconcile_before_retry", "uncertain": "reconcile_before_retry",
                  "sent": "retrieve_author_response"}
+        redundant = self._redundant_return_evidence(session, turn)
+        if redundant:
+            return packet | {"host_step": "inspect_redundant_return_turn", "output_required": False,
+                             "content_state": "result_already_returned", "return_evidence": redundant}
         if turn["state"] in steps:
             return packet | {"host_step": steps[turn["state"]]}
         superseded = {result["reconciles_result_id"] for result in session["results"] if "reconciles_result_id" in result}
@@ -505,7 +603,7 @@ class SessionStore:
         if pending:
             packet["pending_publications"] = pending
         unreturned = [result for result in session["results"] if result["result_id"] not in superseded
-                      and not any(item["result_id"] == result["result_id"] for item in session["turns"])]
+                      and not self._result_return_turns(session, result["result_id"])]
         if unreturned:
             return packet | {"host_step": "prepare_return_result", "result_id": unreturned[-1]["result_id"]}
         if turn_id is not None:

@@ -15,6 +15,8 @@
     "docs/quickstart.md",
     "docs/reduced-mode.md",
     "docs/release-checklist.md",
+    "docs/source-tracking.md",
+    "docs/updates.md",
     "docs/validation.md",
     "docs/video-intake.md",
     "export_release.py",
@@ -24,6 +26,8 @@
     "relay_cli.py",
     "relay_core.py",
     "relay_session.py",
+    "relay_sources.py",
+    "relay_update.py",
     "relay_video.py",
     "release-files.json",
     "skills/interlocutors-relay/SKILL.md",
@@ -33,6 +37,8 @@
     "skills/interlocutors-relay/references/creative-media.md",
     "skills/interlocutors-relay/references/protocol.md",
     "skills/interlocutors-relay/references/reduced-mode.md",
+    "skills/interlocutors-relay/references/source-tracking.md",
+    "skills/interlocutors-relay/references/updates.md",
     "skills/interlocutors-relay/references/video-intake.md",
     "tests/__init__.py",
     "tests/test_export_release.py",
@@ -42,6 +48,8 @@
     "tests/test_relay_cli.py",
     "tests/test_relay_core.py",
     "tests/test_relay_session.py",
+    "tests/test_relay_sources.py",
+    "tests/test_relay_update.py",
     "tests/test_relay_video.py"
   ]
 }

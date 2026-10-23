@@ -76,6 +76,13 @@ def main(argv=None):
     action_packet = commands.add_parser("action-packet", help="inspect an action plan and its supported-tool step; never executes it")
     action_packet.add_argument("--db", required=True, help="same private delivery database used by the text/media core")
     action_packet.add_argument("--action", required=True)
+    source = commands.add_parser("source", help="record scoped host observations and progress; never reads a platform")
+    source.add_argument("--db", required=True, help="existing private session database")
+    source.add_argument("--request", required=True, help="JSON method and arguments for SourceStore")
+    source_packet = commands.add_parser("source-packet", help="list pending observed items for one actor and stream")
+    source_packet.add_argument("--db", required=True, help="existing private session database")
+    source_packet.add_argument("--actor", required=True)
+    source_packet.add_argument("--stream", required=True, choices=["notifications", "messages"])
     packet = commands.add_parser("packet", help="render a minimized local review or operator packet")
     packet.add_argument("--db", required=True)
     packet.add_argument("--case", required=True)
@@ -119,6 +126,15 @@ def main(argv=None):
             else:
                 request = json.loads(Path(args.request).read_text(encoding="utf-8-sig"))
                 result = apply_action_request(store, request)
+        elif args.command in ("source", "source-packet"):
+            from relay_sources import SourceStore, apply_source_request
+
+            store = SourceStore(args.db)
+            if args.command == "source-packet":
+                result = store.source_packet(args.actor, args.stream)
+            else:
+                request = json.loads(Path(args.request).read_text(encoding="utf-8-sig"))
+                result = apply_source_request(store, request)
         else:
             request = json.loads(Path(args.request).read_text(encoding="utf-8-sig"))
             store = Store(args.db)

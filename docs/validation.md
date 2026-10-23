@@ -1,10 +1,28 @@
 # Validation and limits
 
+## Source follow-up after v0.3.0, 2026-10-23
+
+The frozen v0.3.0 archive and the October 22 source/export receipts below remain unchanged. This follow-up adds source progress tracking, mixed author choices and explicit earlier-turn bridges, and an idle-startup GitLab updater. The integrated source suite ran **142 tests: 141 passed and one Windows symlink fixture skipped**, completing in 46.934 seconds. A clean 50-file source export produced by `export_release.py` then ran the same full suite: **142 tests, 141 passed and the same skip**, completing in 30.467 seconds.
+
+The final documentation-only receipt update leaves runtime and test files unchanged from that tested export. The final source package contains the 50 allowlisted files plus `EXPORT-MANIFEST.json`; its per-file byte identities are checked during final export rather than inferred from the passing tests. This is a new source-follow-up package, not a replacement of the frozen v0.3.0 archive.
+
+The new local checks exercise these specific behaviors:
+
+- `SourceStore` separates actor/stream source revisions from the platform's unread state. Changed content does not discard an earlier relayed revision's pending response or result. Reobserving a relayed turn preserves its author disposition; a new context turn resumes response retrieval. An old return event cannot close a newer reconciled result. Progress remains an operator attestation, with SessionStore and ActionStore retaining the individual action histories.
+- `SessionStore` accepts `MULTIPLE` with explicitly typed candidates, exports each chosen action using that candidate's disposition, and retains its own response and selection provenance. Explicit earlier-turn exports and result recording survive a later one-way receipt without changing latest-turn defaults. Pending author transport remains a prerequisite; old records need no schema migration.
+- The updater's fixture suite uses temporary local Git repositories and synthetic databases to exercise check-only behavior, staged validation, fast-forward application, source/private-file preservation, busy runtime and updater guards, rejected divergence or failed tests, and diagnostic redaction. Those fixture results do not establish a production update or current GitLab availability. The host must be idle and restart after an installed update; installed skill synchronization is a separate step.
+
+### Bounded live source observation
+
+An active host inspected two authorized actors' notification lists separately and one profile's message list. One observed unread flag cleared while the same source revision remained recorded as awaiting an author response. The actual returned author response then chose `QUIET` for four presented sources, and those four source records closed without a content action. No post, comment, message, reaction or other content mutation was performed in this observation.
+
+This establishes the observed separation between a UI read flag, recorded relay progress and the author's actual disposition for that bounded sample. It does not establish complete inbox coverage, unseen-source absence, unattended operation or a successful production updater run. Private identities, source text, conversation references and raw receipts remain outside the public source.
+
 ## Source follow-up after v0.3.0, 2026-10-22
 
 The frozen v0.3.0 archive and its dated receipt below remain unchanged. The current source adds a reduced-mode runbook for a separately configured external host timer. It uses existing session/action APIs; no Python scheduler or unattended browser adapter is added. A saved runbook is not evidence of an enabled timer or a completed scheduled window.
 
-The source and a clean export each ran the existing suite: **104 tests, 103 passed and one Windows symlink fixture skipped**. Subsequent edits are limited to documentation and the generated integrity manifest; executable runtime and test files are unchanged. The expanded allowlist now has 42 source files, including both portable copies of the reduced-mode guide. The final export's per-file hashes, sizes, ZIP CRC, exact entry set, relative links and guide mirrors were checked separately.
+That source snapshot and a clean export each ran the existing suite: **104 tests, 103 passed and one Windows symlink fixture skipped**. Subsequent edits within that checkpoint were limited to documentation and the generated integrity manifest; executable runtime and test files were unchanged. Its expanded allowlist had 42 source files, including both portable copies of the reduced-mode guide. The final export's per-file hashes, sizes, ZIP CRC, exact entry set, relative links and guide mirrors were checked separately.
 
 Later supported-tool observations extend the earlier live record:
 

@@ -369,6 +369,125 @@ class RelaySessionTests(unittest.TestCase):
         with self.assertRaises(StateError):
             self.store.export_to_action_request("private", "stale", "friend_request", {}, {}, {})
 
+    def test_mixed_choices_keep_each_action_type_and_selection_provenance(self):
+        from relay_actions import ActionStore
+
+        self.send()
+        candidates = [
+            {"candidate_id": "haha", "disposition": "REACT", "action_data": {"reaction": "HAHA"},
+             "source_ref": "author-reaction-choice"},
+            {"candidate_id": "comment", "disposition": "REPLY", "text": "Hello.",
+             "source_ref": "author-comment-choice"},
+        ]
+        self.answer("MULTIPLE", candidates)
+        actor = {"actor_id": "page", "actor_kind": "page", "source_ref": "fresh-page-check"}
+        actions = ActionStore(":memory:")
+        try:
+            for candidate, action in zip(candidates, ("react", "comment")):
+                choice = candidate["candidate_id"]
+                self.store.select_candidate("private", "t1", choice, f"selected-{choice}")
+                packet = self.store.export_to_action_request(
+                    "private", choice, action, actor,
+                    {"destination_id": f"target-{choice}", "reply_parent_id": f"parent-{choice}",
+                     "surface": "feed_item", "audience": "public"},
+                    {"source_ref": "human-scoped-permission"})
+                arguments = packet["requests"][0]["arguments"]
+                created = actions.create_action(**arguments)
+                self.assertEqual(created["action"], action)
+                self.assertEqual(created["selection_ref"]["selection_ref"], f"selected-{choice}")
+                self.assertEqual(created["selection_ref"]["candidate_source_ref"], candidate["source_ref"])
+                result = self.store.record_result("private", f"result-{choice}", "verified",
+                                                  "Synthetic reopened result.", f"receipt-{choice}")
+                self.assertEqual(result["disposition"], candidate["disposition"])
+                self.assertEqual(result["candidate"]["candidate_id"], choice)
+                self.assertEqual(result["selection_ref"], f"selected-{choice}")
+        finally:
+            actions.close()
+        self.assertEqual(self.store.inspect("private")["turns"][0]["response"]["disposition"], "MULTIPLE")
+
+    def test_earlier_choice_survives_one_way_return_without_latest_turn_rebinding(self):
+        self.selected()
+        self.store.record_result("private", "first", "verified", "First choice observed.", "first-receipt")
+        self.store.prepare_turn("private", "receipt", "Coda: first result.", purpose="return_result",
+                                result_id="first", expects_response=False)
+        self.store.begin_dispatch("private", "receipt", "receipt-attempt")
+        self.store.record_sent("private", "receipt", "saved-receipt", "Reopened receipt.")
+        self.store.select_candidate("private", "t1", "b", "author explicitly selected B too")
+        self.store.close()
+        self.store = SessionStore(self.path)
+
+        self.assertEqual(self.store.next_step_packet("private")["host_step"], "complete_without_response")
+        step = self.store.next_step_packet("private", turn_id="t1")
+        self.assertEqual(step["candidate"]["candidate_id"], "b")
+        self.assertEqual(step["turn"]["turn_id"], "t1")
+        with self.assertRaises(StateError):
+            self.store.export_to_action_request("private", "implicit", "comment", {}, {}, {})
+        packet = self.store.export_to_action_request("private", "explicit", "comment", {}, {}, {}, turn_id="t1")
+        provenance = packet["requests"][0]["arguments"]["selection_ref"]
+        self.assertEqual(provenance["turn_id"], "t1")
+        self.assertEqual(provenance["response_ref"], "saved-author-message-t1")
+        self.assertEqual(provenance["selection_ref"], "author explicitly selected B too")
+        result = self.store.record_result("private", "second", "verified", "Second choice observed.",
+                                          "second-receipt", turn_id="t1")
+        self.assertEqual(result["turn_id"], "t1")
+        self.assertEqual(result["candidate"]["candidate_id"], "b")
+        self.assertEqual(self.store.inspect("private")["results"][0]["candidate"]["candidate_id"], "a")
+
+    def test_explicit_older_choice_cannot_bypass_pending_author_dispatch(self):
+        self.selected()
+        self.store.prepare_turn("private", "pending", "Coda: more context.")
+        with self.assertRaises(StateError):
+            self.store.export_to_action_request("private", "old", "comment", {}, {}, {}, turn_id="t1")
+        with self.assertRaises(StateError):
+            self.store.record_result("private", "wrong-turn", "verified", "Observed.", "receipt", turn_id="t1")
+        self.assertEqual(self.store.next_step_packet("private", turn_id="t1")["turn"]["turn_id"], "pending")
+
+    def test_mixed_response_requires_valid_per_candidate_dispositions(self):
+        self.send()
+        for disposition, candidates in (
+            ("MULTIPLE", []),
+            ("MULTIPLE", [self.candidate("a", "No per-candidate type")]),
+            ("MULTIPLE", [self.candidate("a", "Invalid type") | {"disposition": "QUIET"}]),
+            ("MULTIPLE", [self.candidate("a", "Nested type") | {"disposition": "MULTIPLE"}]),
+            ("MULTIPLE", [self.candidate("a", "Malformed type") | {"disposition": []}]),
+            ("REPLY", [self.candidate("a", "Conflicting type") | {"disposition": "REACT"}]),
+        ):
+            with self.subTest(disposition=disposition, candidates=candidates):
+                with self.assertRaises(ValidationError):
+                    self.answer(disposition, candidates)
+        self.answer("REPLY", [self.candidate("a", "Legacy candidate.")])
+        saved = self.store.inspect("private")["turns"][0]["response"]["candidates"][0]
+        self.assertNotIn("disposition", saved)
+
+    def test_mixed_core_bridge_uses_selected_type_and_explicit_original_turn(self):
+        self.send()
+        self.answer("MULTIPLE", [
+            self.candidate("text", "Exact chosen comment.") | {"disposition": "REPLY"},
+            {"candidate_id": "reaction", "disposition": "REACT", "action_data": {"reaction": "LOVE"},
+             "source_ref": "author-reaction-choice"},
+        ])
+        self.store.select_candidate("private", "t1", "reaction", "selected-reaction")
+        with self.assertRaises(StateError):
+            self.store.export_to_core_request("private", "case", "r1", {})
+        self.send("later")
+        self.answer("REPLY", [self.candidate("text", "Different newer text.")], "later")
+        self.store.select_candidate("private", "later", "text", "newer-selection")
+        self.store.select_candidate("private", "t1", "text", "original-selection")
+        binding = {"author_route": "example-thread", "actor_id": "example-page", "actor_kind": "page",
+                   "destination_id": "example-target", "action": "reply", "context_ref": "source",
+                   "reply_parent_id": "parent", "audience": "public"}
+        packet = apply_session_request(self.store, {
+            "method": "export_to_core_request", "arguments": {
+                "session_id": "private", "case_id": "case", "revision_id": "r1",
+                "binding": binding, "turn_id": "t1"}})
+        revision = packet["requests"][1]["arguments"]
+        self.assertEqual(revision["text"], "Exact chosen comment.")
+        self.assertEqual(revision["source_ref"]["turn_id"], "t1")
+        self.assertEqual(revision["source_ref"]["response_ref"], "saved-author-message-t1")
+        self.assertEqual(revision["source_ref"]["selection_ref"], "original-selection")
+        with self.assertRaises(NotFoundError):
+            self.store.export_to_core_request("private", "case", "r1", binding, turn_id="missing")
+
 
 if __name__ == "__main__":
     unittest.main()

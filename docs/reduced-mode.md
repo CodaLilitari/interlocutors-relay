@@ -9,6 +9,7 @@ Use this mode only after the human requests recurring work. Create or update the
 These are maximums, not output targets. The host may stop earlier, and the interlocutor may choose no action. The human can change the bounds explicitly.
 
 - Inspect up to three new or changed message/reply items and up to three feed items, using already authorized accounts. Prioritize follow-ups to the interlocutor's own conversations. Alternate feed sampling between authorized actors rather than exhaustively browsing both on every wake.
+- Check notifications and messages separately for the actor being sampled. Track stable observed items and their content revisions independently of Facebook's unread/new indicators using the [source tracker](source-tracking.md). Record each stream's bounded coverage or unavailable/deferred status even when there is no new item; a zero badge is not proof of no pending Relay work. These checks share the same message/reply item and time limits above.
 - Carry at most one short combined context packet to the designated saved authoring conversation. Include at most one useful scoped screenshot when visual judgment is needed, with enough source context to identify each item. Preserve exact words when quoting; label any summary as the operator's summary. Do not include unrelated messages or interface content.
 - Invite the interlocutor to select up to three exact responses/actions, a private thought or original idea, a request for more context, hold, or quiet. Fewer actions or no action are valid choices. The packet may explicitly report that no new messages were observed; it must not claim an exhaustive inbox audit from a bounded sample.
 - Perform up to three selected social actions within the current human authority. For each action separately, check the fresh actor/target/audience and exact payload, record its claim, execute once and verify the result before moving to the next action. Stop the window on uncertainty. Return a concise result packet identifying each action's observed outcome to the same authoring conversation. An image with its selected caption is one action; a separate reaction, share, comment, or second recipient counts as another action.
@@ -18,11 +19,15 @@ If there is no changed message or useful fresh feed context, skip repetitive sou
 
 ## Resume before collecting more
 
+If the human has enabled source auto-updates, check the [GitLab updater](updates.md) at idle startup after the usage gate, before runtime writes or browser work. Supply the existing private databases and the explicit host-idle assertion only after checking for another operator or active browser mutation. Pending sends and uncertain outcomes defer updating; reconcile them through the existing runtime. After an installed update, start fresh runtime processes and verify that the installed skill links to the updated source, or synchronize its files before proceeding. A failed check does not authorize clearing state; an uncertain installation stops runtime work for inspection.
+
 Read the private handoff and the session's next-step packet first. Reconcile any in-flight or uncertain send by inspecting the same saved conversation or platform target. Retrieve an already-sent author turn's response before preparing a new intake. A missed window does not accrue work: do not run catch-up batches or duplicate announcements.
 
 Use the existing `SessionStore` turn and result methods and `ActionStore` claim/receipt flow in the [active-session guide](active-session.md) and [action guide](actions.md). No extra scheduler state machine is required inside the Python core. Cooperating operators must share the existing databases and coordinate browser ownership. Another host run or manual session can still act outside these local guards; the operator must check for overlapping work before touching an account.
 
 Store a compact private window receipt: observed time, sampled source references, existing or new author turn, actual choice, action or explicit no-action reason, observed outcome, and next pending step. Use opaque references where practical. Do not commit private receipts, account identifiers, messages, screenshots, or databases to the public source repository.
+
+Use `SourceStore` with the existing private session database to distinguish inspection, actual relay, pending author response, disposition and returned action results for each actor's notifications and messages. Process an edited item as a new revision without losing outstanding work for its earlier revision. The source packet lists only previously observed items; inspect both authorized streams separately rather than inferring coverage from that list or from a platform unread flag.
 
 ## Keep the current action scope
 

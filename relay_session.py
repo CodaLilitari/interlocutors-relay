@@ -21,7 +21,7 @@ from relay_core import ConflictError, NotFoundError, StateError, ValidationError
 
 DISPOSITIONS = {
     "REPLY", "REACT", "SHARE", "SHARE_WITH_COMMENTARY", "ORIGINAL_POST", "IMAGE",
-    "MESSAGE", "BLOCK", "FRIEND_REQUEST",
+    "MESSAGE", "BLOCK", "FRIEND_REQUEST", "MULTIPLE",
     "NEED_CONTEXT", "NEED_RESEARCH", "HOLD", "QUIET", "DISAGREE",
 }
 NON_OUTPUT = {"NEED_CONTEXT", "NEED_RESEARCH", "HOLD", "QUIET", "DISAGREE"}
@@ -297,7 +297,9 @@ class SessionStore:
 
         Candidate extraction is separate from selection. ``source_ref`` records
         where each extracted candidate came from; no last/longest-text heuristic
-        or automatic endorsement is applied.
+        or automatic endorsement is applied. A MULTIPLE response requires an
+        explicit output disposition on each candidate; older single-disposition
+        candidates continue to inherit the response disposition unchanged.
         """
         _ref(response_ref, "response_ref")
         _string(exact_response, "exact_response")
@@ -309,8 +311,13 @@ class SessionStore:
             raise ValidationError("candidates must be a list")
         checked, ids = [], set()
         for candidate in candidates:
-            if not isinstance(candidate, dict) or set(candidate) - {"candidate_id", "text", "attachments", "action_data", "source_ref"}:
+            if not isinstance(candidate, dict) or set(candidate) - {"candidate_id", "text", "attachments", "action_data", "source_ref", "disposition"}:
                 raise ValidationError("candidate contains unsupported fields")
+            candidate_disposition = candidate.get("disposition", disposition)
+            if not isinstance(candidate_disposition, str) or candidate_disposition not in _DISPOSITION_ACTIONS:
+                raise ValidationError("candidate.disposition must identify an output action")
+            if disposition != "MULTIPLE" and candidate_disposition != disposition:
+                raise ValidationError("different candidate dispositions require a MULTIPLE response")
             candidate_id = _string(candidate.get("candidate_id"), "candidate_id")
             if candidate_id in ids:
                 raise ValidationError("candidate_id values must be unique within a response")
@@ -320,6 +327,8 @@ class SessionStore:
                     "action_data": candidate.get("action_data", {}),
                     "source_ref": _ref(candidate.get("source_ref"), "candidate.source_ref"),
                     "response_ref": response_ref}
+            if "disposition" in candidate:
+                item["disposition"] = candidate_disposition
             if not isinstance(item["action_data"], dict):
                 raise ValidationError("candidate.action_data must be an object")
             if not item["text"].strip() and not item["attachments"] and not item["action_data"]:
@@ -327,6 +336,8 @@ class SessionStore:
             checked.append(item)
         if disposition in NON_OUTPUT and checked:
             raise ValidationError("non-output dispositions have no selected public candidates")
+        if disposition == "MULTIPLE" and not checked:
+            raise ValidationError("MULTIPLE requires explicitly typed candidates")
         response = {"response_ref": response_ref, "exact_response": exact_response,
                     "disposition": disposition, "candidates": checked, "recorded_at": _now()}
         _json(response)
@@ -353,19 +364,37 @@ class SessionStore:
             return self._save_turn(session_id, turn)
 
     @staticmethod
-    def _selection(session):
+    def _choice_turn(session, turn_id=None):
         if not session["turns"]:
             raise StateError("session has no response or selected candidate")
-        turn = session["turns"][-1]
+        if turn_id is None:
+            return session["turns"][-1]
+        _string(turn_id, "turn_id")
+        turn = next((item for item in session["turns"] if item["turn_id"] == turn_id), None)
+        if turn is None:
+            raise NotFoundError("turn not found for session")
+        return turn
+
+    @staticmethod
+    def _selection(session, turn_id=None):
+        turn = SessionStore._choice_turn(session, turn_id)
+        if turn_id is not None and any(item["state"] not in {"responded", "closed"} for item in session["turns"]):
+            raise StateError("finish or reconcile the existing author turn before carrying an earlier selection")
         if turn["state"] != "responded" or turn["selected_candidate_id"] is None:
-            raise StateError("latest turn has no explicit candidate selection")
+            raise StateError("requested turn has no explicit candidate selection" if turn_id is not None
+                             else "latest turn has no explicit candidate selection")
         candidate = next(item for item in turn["response"]["candidates"]
                          if item["candidate_id"] == turn["selected_candidate_id"])
         return turn, candidate
 
+    @staticmethod
+    def _candidate_disposition(turn, candidate):
+        return candidate.get("disposition", turn["response"]["disposition"])
+
     def record_result(self, session_id: str, result_id: str, outcome: str, observation: str,
-                      source_ref: Any, action_authority: Any = "not_recorded") -> dict[str, Any]:
-        """Record what the host actually observed, including uncertain outcomes."""
+                      source_ref: Any, action_authority: Any = "not_recorded", *,
+                      turn_id: str | None = None) -> dict[str, Any]:
+        """Record an outcome for the selected candidate on the explicit or latest turn."""
         _string(result_id, "result_id")
         if outcome not in {"verified", "uncertain", "failed_before_submit"}:
             raise ValidationError("result outcome must be verified, uncertain, or failed_before_submit")
@@ -375,8 +404,8 @@ class SessionStore:
                   "action_authority": action_authority}
         with self._write():
             session = self.inspect(session_id)
-            turn, candidate = self._selection(session)
-            result.update({"turn_id": turn["turn_id"], "disposition": turn["response"]["disposition"],
+            turn, candidate = self._selection(session, turn_id)
+            result.update({"turn_id": turn["turn_id"], "disposition": self._candidate_disposition(turn, candidate),
                            "candidate": candidate, "selection_ref": turn["selections"][-1]["selection_ref"]})
             try:
                 self._db.execute("INSERT INTO relay_session_results(session_id,result_id,document) VALUES (?,?,?)",
@@ -447,7 +476,8 @@ class SessionStore:
             self._insert_session(document)
         return document
 
-    def next_step_packet(self, session_id: str) -> dict[str, Any]:
+    def next_step_packet(self, session_id: str, *, turn_id: str | None = None) -> dict[str, Any]:
+        """Resume transport/results first, then optionally an earlier choice turn."""
         session = self.inspect(session_id)
         if not session["turns"]:
             return self.author_intake_packet(session_id) | {"host_step": "prepare_author_intake"}
@@ -464,6 +494,9 @@ class SessionStore:
                       and not any(item["result_id"] == result["result_id"] for item in session["turns"])]
         if unreturned:
             return packet | {"host_step": "prepare_return_result", "result_id": unreturned[-1]["result_id"]}
+        if turn_id is not None:
+            turn = self._choice_turn(session, turn_id)
+            packet.update(turn=turn, execution_state=turn["state"])
         if turn["state"] == "closed":
             return packet | {"host_step": "complete_without_response", "content_state": "receipt_sent",
                              "output_required": False}
@@ -478,23 +511,27 @@ class SessionStore:
             return packet | {"host_step": "request_candidate"}
         if turn["selected_candidate_id"] is None:
             return packet | {"host_step": "select_candidate_explicitly"}
+        _, candidate = self._selection(session, turn_id)
         return packet | {"host_step": "carry_selected_candidate_under_applicable_authority",
-                         "content_state": "selected_candidate", "candidate": self._selection(session)[1]}
+                         "content_state": "selected_candidate", "candidate": candidate,
+                         "disposition": self._candidate_disposition(turn, candidate)}
 
     def export_to_core_request(self, session_id: str, case_id: str, revision_id: str,
-                               binding: dict[str, Any], account_policy: Any = None) -> dict[str, Any]:
+                               binding: dict[str, Any], account_policy: Any = None, *,
+                               turn_id: str | None = None) -> dict[str, Any]:
         """Bridge a chosen payload into strict core requests without executing them.
 
         Core metadata must already exist in attachment ``core_media`` fields.
         This bridge never invents file hashes, platform IDs, authority, or an
         endorsement. Non-text actions and native platform assets use
         ``export_to_action_request`` so their selected action data is retained.
+        Set ``turn_id`` when carrying another choice after a later receipt turn.
         """
         from relay_core import _binding, _media, _text
 
         session = self.inspect(session_id)
-        turn, candidate = self._selection(session)
-        disposition = turn["response"]["disposition"]
+        turn, candidate = self._selection(session, turn_id)
+        disposition = self._candidate_disposition(turn, candidate)
         actions = {"REPLY": {"reply", "comment"}, "ORIGINAL_POST": {"post", "original_post"},
                    "IMAGE": {"post", "original_post", "reply", "comment"}}
         if disposition not in actions:
@@ -525,7 +562,8 @@ class SessionStore:
                                  actor: dict[str, Any], target: dict[str, Any],
                                  authority: dict[str, Any], scope: str = "live",
                                  friend_request_permission: Any = None,
-                                 account_policy: Any = None) -> dict[str, Any]:
+                                 account_policy: Any = None, *,
+                                 turn_id: str | None = None) -> dict[str, Any]:
         """Carry a selected action into ActionStore without performing it.
 
         ActionStore validates the full plan, permissions and observed actor /
@@ -533,10 +571,12 @@ class SessionStore:
         host uses that store in the same delivery database as the text core.
         Native GIF selections remain platform references, never invented file
         hashes. This request does not claim an operation or grant authority.
+        Set ``turn_id`` to bind an earlier responded turn explicitly; its stored
+        candidate and selection references are retained instead of the latest turn.
         """
         session = self.inspect(session_id)
-        turn, candidate = self._selection(session)
-        disposition = turn["response"]["disposition"]
+        turn, candidate = self._selection(session, turn_id)
+        disposition = self._candidate_disposition(turn, candidate)
         _string(action, "action")
         if action not in _DISPOSITION_ACTIONS.get(disposition, set()):
             raise ValidationError("action conflicts with the selected disposition")

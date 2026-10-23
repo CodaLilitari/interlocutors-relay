@@ -226,6 +226,51 @@ class RelayActionTests(unittest.TestCase):
             self.create("page-friend", "friend_request", selected=candidate(), acting=actor("page"),
                         destination=target("profile", "recipient"), friend_request_permission=permission)
 
+    def test_page_like_requires_exact_page_and_unliked_state_without_other_actions(self):
+        page_url = "https://social.example/pages/science"
+        selected = candidate(data={"page_url": page_url})
+        destination = target("page", "public") | {"page_url": page_url, "page_like_state": "not_liked"}
+        invalid = [destination | {"surface": "profile"}, destination | {"surface": "post"},
+                   destination | {"reply_parent_id": "content-item"}, destination | {"page_url": None},
+                   destination | {"page_url": "science"}, destination | {"page_url": "http://social.example/page"},
+                   destination | {"page_url": "https://social.example/"},
+                   destination | {"page_url": "https://user:password@social.example/page"},
+                   destination | {"page_url": "https://[broken/page"},
+                   destination | {"page_like_state": "liked"}, destination | {"page_like_state": "unknown"}]
+        for wrong in invalid:
+            with self.subTest(target=wrong), self.assertRaises(ValidationError):
+                self.create(action="like_page", selected=selected, destination=wrong)
+        for wrong in (candidate("Public caption", {"page_url": page_url}),
+                      candidate(data={"page_url": "https://social.example/pages/other"}),
+                      candidate(data={"page_url": page_url, "reaction": "LIKE"}),
+                      candidate(data={"page_url": page_url, "follow": True}),
+                      candidate(data={"page_url": page_url, "platform_media": {"kind": "gif", "ref": "asset"}})):
+            with self.subTest(candidate=wrong), self.assertRaises(ValidationError):
+                self.create(action="like_page", selected=wrong, destination=destination)
+        for kind in ("page", "profile"):
+            saved = self.create(kind, "like_page", acting=actor(kind), selected=selected, destination=destination)
+            self.assertEqual(saved["actor"]["actor_kind"], kind)
+            self.assertEqual(saved["candidate"], selected)
+
+    def test_page_like_result_cannot_substitute_follow_reaction_or_another_page(self):
+        page_url = "https://social.example/pages/science"
+        self.create(action="like_page", selected=candidate(data={"page_url": page_url}),
+                    destination=target("page", "public") | {"page_url": page_url, "page_like_state": "not_liked"})
+        self.store.begin_action("a1", "op1")
+        evidence = self.evidence() | {"page_url": page_url, "page_like_state": "liked", "action_taken": True}
+        for wrong in (self.evidence() | {"reaction": "LIKE"},
+                      evidence | {"page_like_state": "following"}, evidence | {"action_taken": False},
+                      evidence | {"page_url": "https://social.example/pages/other"},
+                      evidence | {"actor_id": "other-actor"}):
+            with self.subTest(evidence=wrong), self.assertRaises(ValidationError):
+                self.store.record_outcome("op1", "verified", wrong)
+        with self.assertRaises(ValidationError):
+            self.store.record_outcome("op1", "submitted_pending", evidence | {"submission_observed": True, "publication_state": "pending"})
+        self.store.record_outcome("op1", "verified", evidence)
+        self.assertFalse(self.store.begin_action("a1", "op1")["newly_claimed"])
+        with self.assertRaises(StateError):
+            self.store.begin_action("a1", "op2")
+
     def test_block_can_be_described_but_cannot_dispatch_as_live_test(self):
         self.create(action="block", selected=candidate(), destination=target("profile", "account"), scope="live_test")
         packet = self.store.action_packet("a1")

@@ -13,6 +13,7 @@ import json
 import sqlite3
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from relay_core import (
     ConflictError, NotFoundError, StateError, Store, ValidationError,
@@ -21,7 +22,7 @@ from relay_core import (
 
 
 ACTIONS = {"message", "react", "share", "share_with_commentary", "post", "original_post",
-           "comment", "reply", "friend_request", "block"}
+           "comment", "reply", "friend_request", "block", "like_page"}
 ACTION_METHODS = {"create_action", "begin_action", "record_outcome", "reconcile",
                   "inspect", "action_packet", "recover"}
 _SURFACES = {"feed_item", "post", "comment", "profile_timeline", "page_timeline", "message_thread", "profile", "page"}
@@ -223,6 +224,23 @@ class ActionStore(Store):
             raise ValidationError("friend request requires an exact profile target")
         if action == "block" and target["surface"] not in {"profile", "page"}:
             raise ValidationError("block requires an exact profile or Page target")
+        if action == "like_page":
+            if target["surface"] != "page" or target.get("reply_parent_id") is not None:
+                raise ValidationError("like_page requires an exact Page target, not a content item")
+            page_url = target.get("page_url")
+            if not isinstance(page_url, str):
+                raise ValidationError("like_page requires an exact target.page_url")
+            try:
+                parsed = urlsplit(page_url)
+                valid_url = (parsed.scheme == "https" and parsed.hostname and parsed.path not in {"", "/"}
+                             and not parsed.username and not parsed.password
+                             and not any(char.isspace() for char in page_url))
+            except ValueError:
+                valid_url = False
+            if not valid_url:
+                raise ValidationError("like_page requires an absolute HTTPS Page URL")
+            if target.get("page_like_state") != "not_liked":
+                raise ValidationError("like_page requires observed not_liked state; already_liked is a no-op")
         if action == "friend_request" and actor["actor_kind"] != "profile":
             raise ValidationError("friend request requires the intended profile actor")
         if action in {"comment", "reply"}:
@@ -256,6 +274,11 @@ class ActionStore(Store):
             _reference(platform_media.get("ref"), "platform_media.ref")
         if action == "react":
             _id(action_data.get("reaction"), "action_data.reaction")
+        if action == "like_page":
+            if action_data.get("page_url") != target["page_url"]:
+                raise ValidationError("selected page_url must match the exact Page target")
+            if candidate.get("text", "") or attachments or set(action_data) - {"page_url", "rationale"}:
+                raise ValidationError("like_page is distinct from content, reactions, follows and other actions")
         if action in {"share", "share_with_commentary"}:
             _reference(action_data.get("source_ref"), "action_data.source_ref")
         if action in _CONTENT_ACTIONS and not (candidate.get("text", "").strip() or attachments or platform_media):
@@ -393,6 +416,8 @@ class ActionStore(Store):
             action_data = action["candidate"].get("action_data", {})
             if action["action"] == "react":
                 expected["reaction"] = action_data["reaction"]
+            if action["action"] == "like_page":
+                expected.update(page_url=action["target"]["page_url"], page_like_state="liked", action_taken=True)
             if action["action"] in {"share", "share_with_commentary"}:
                 expected["shared_source_ref"] = action_data["source_ref"]
             if action_data.get("platform_media") is not None:

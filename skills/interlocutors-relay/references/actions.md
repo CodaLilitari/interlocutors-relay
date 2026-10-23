@@ -18,6 +18,7 @@ Keep distinct actor records, for example `{"actor_id":"example-page","actor_kind
 | `post` / `original_post` | Exact text and/or media | Explicit `reply_parent_id: null` |
 | `comment` / `reply` | Exact text and/or media | Exact nonempty `reply_parent_id` |
 | `react` | `action_data.reaction`, such as the actual selected `LOVE` | Exact source item and its observed surface/audience |
+| `like_page` | `LIKE_PAGE` disposition with `action_data.page_url` identifying the selected Page | `surface: page`, exact Page identity and matching `page_url`, observed `page_like_state: not_liked` |
 | `share` / `share_with_commentary` | `action_data.source_ref` for the original post; commentary remains exact candidate text | Exact share destination, surface and audience |
 | `friend_request` | Selected rationale plus the separate specific user permission below | Intended profile actor and `surface: profile` target |
 | `block` | Selected decision and context | Exact `surface: profile` or `surface: page` identity target; excluded from live tests |
@@ -88,6 +89,16 @@ Changing local action or operation IDs does not authorize a resend. While pendin
 Return the observed outcome to the original session with `record_result`, then carry its `return_result_packet` to the interlocutor. A returned pending receipt closes that conversational transport, not the publication: it remains available for later observation. Append later session evidence with `reconcile_result` and return that new result separately. Keep no-action, submitted, pending, published, not-published and recipient-read claims distinct. A later incoming message or comment may use `observe_followup` when the active task includes it; there is no automatic polling or inbox listener here.
 
 ## Relationship actions and capability limits
+
+### Liking a Page
+
+`LIKE_PAGE` / `like_page` records a Page relationship, separately from a Like reaction on a post, Follow, joining a group, or sending a friend request. Ask the interlocutor for the exact Pages and acting profile or Page. A recalled wishlist supplies context, not a guessed set of targets: resolve names to actual Page identities and URLs, returning ambiguous matches for selection. A historical wish does not establish the current state or the selected actor.
+
+Before each proposed Like, freshly verify the acting account and exact Page, and inspect its current Like control. An existing Liked state is `already_liked`: preserve it without clicking, and return `SessionStore.record_result(outcome="verified", ...)` with an observation saying no mutation occurred and a `source_ref` containing `state: already_liked`, `action_taken: false`, the actor, Page URL and observation reference. This verifies an existing state; do not create or claim a synthetic ActionStore operation. If the state or available control is unclear, return that uncertainty rather than toggling it.
+
+For an observed unliked Page, bind `target.page_url` to the same absolute HTTPS URL as `candidate.action_data.page_url`, set `target.surface: page` and `target.page_like_state: not_liked`, and preserve the exact target identity and audience. The candidate may include a rationale but cannot carry a caption, attachment, reaction or another action. After the ordinary single-operation claim, use the actual Like control once and reopen or inspect the resulting Liked state for the same actor and Page. A verified action receipt requires the usual actor/target/digest/time evidence plus `page_url`, `page_like_state: liked` and `action_taken: true`. Return each Page's result separately, including already-liked no-ops; an uncertain click still uses the shared no-blind-retry guard.
+
+Availability can differ between the profile actor and Page actor. A Follow-only control is not a Like; do not substitute it. If the interface bundles a Like with another relationship change, disclose the bundle and obtain an applicable selection and authority before using it. Page-like authority does not itself authorize a separate Follow, group join, friend request or block. These local records do not prove that Facebook offers a Like control for every Page or actor.
 
 A friend request requires a separate `friend_request_permission` object with `approved: true`, `granted_by: user`, the exact `actor_id` and `destination_id`, a nonempty `rationale`, and `source_ref` pointing to the human's specific permission. A general account-use grant, the interlocutor's preference or a suggested rationale cannot substitute for that decision. A Page cannot use this profile-only action type.
 

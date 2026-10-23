@@ -26,7 +26,8 @@ ACTION_METHODS = {"create_action", "begin_action", "record_outcome", "reconcile"
                   "inspect", "action_packet", "recover"}
 _SURFACES = {"feed_item", "post", "comment", "profile_timeline", "page_timeline", "message_thread", "profile", "page"}
 _CONTENT_ACTIONS = {"message", "post", "original_post", "comment", "reply", "share_with_commentary"}
-_OUTCOMES = {"verified", "uncertain", "failed_before_submit"}
+_PUBLICATION_ACTIONS = {"post", "original_post", "comment", "reply", "share", "share_with_commentary"}
+_OUTCOMES = {"verified", "uncertain", "failed_before_submit", "submitted_pending", "not_published"}
 _PACKET_SCHEMA = "interlocutors-relay/action-packet/v1"
 
 
@@ -45,6 +46,39 @@ def _object(value: Any, label: str) -> dict[str, Any]:
 
 def _guard_id(operation_id: str) -> str:
     return "relay-action:" + operation_id
+
+
+def _publication_binding(action: dict[str, Any]) -> dict[str, Any]:
+    """Stable delivery identity, excluding presentation and UI observation data.
+
+    The same post can appear as a feed item, and the same destination timeline
+    can appear through a profile or Page view. Those surfaces stay exact in the
+    action digest and outcome evidence, but cannot make a repeated submission
+    into a different action. Shared-source and commentary differences remain
+    part of the content comparison.
+    """
+    return {"action": {"original_post": "post", "reply": "comment", "share_with_commentary": "share"}.get(action["action"], action["action"]),
+            "actor": {key: action["actor"][key] for key in ("actor_id", "actor_kind")},
+            "target": {key: action["target"].get(key) for key in
+                       ("destination_id", "audience", "reply_parent_id")}}
+
+
+def _publication_content(action: dict[str, Any]) -> dict[str, Any]:
+    """Match pending text/media even when a clone supplies new provenance IDs."""
+    candidate = action["candidate"]
+    data = candidate.get("action_data", {})
+    attachments = candidate.get("attachments", [])
+    return {"text": candidate.get("text", ""),
+            "attachments": [{"sha256": item["sha256"], "byte_size": item["byte_size"],
+                             "alt_text": attachment.get("alt_text", attachment.get("core_media", {}).get("alt_text"))}
+                            for item, attachment in zip(action.get("local_attachments", []), attachments)],
+            "platform_media": {key: data["platform_media"].get(key) for key in ("kind", "ref")}
+                              if data.get("platform_media") is not None else None,
+            "shared_source_ref": data.get("source_ref") if action["action"] in {"share", "share_with_commentary"} else None}
+
+
+def _candidate_provenance(action: dict[str, Any]) -> dict[str, Any]:
+    return {key: action["candidate"].get(key) for key in ("candidate_id", "source_ref", "response_ref")}
 
 
 def _local_attachments(candidate: dict[str, Any]) -> list[dict[str, Any]]:
@@ -130,6 +164,29 @@ class ActionStore(Store):
     def _save_operation(db, operation):
         db.execute("UPDATE relay_action_operations SET document=? WHERE operation_id=?",
                    (_json(operation, "action operation"), operation["operation_id"]))
+
+    def _pending_duplicate(self, db, action):
+        """A new local ID cannot authorize another copy of a submitted item.
+
+        While pending, match actual actor/target/content regardless of candidate
+        IDs. Once resolved, retain the original candidate's no-resend boundary;
+        a genuinely new author selection is a separate action.
+        """
+        if action["action"] not in _PUBLICATION_ACTIONS:
+            return None
+        binding = _publication_binding(action)
+        for row in db.execute("SELECT document FROM relay_actions WHERE action_id<>?", (action["action_id"],)):
+            other = json.loads(row[0])
+            if other["action"] not in _PUBLICATION_ACTIONS or _publication_binding(other) != binding:
+                continue
+            for operation in self._operations(db, other["action_id"]):
+                if operation["state"] == "submitted_pending" and _publication_content(other) == _publication_content(action):
+                    return operation["operation_id"]
+                has_submission = any(item["outcome"] in {"submitted_pending", "not_published"}
+                                     for item in operation["observations"])
+                if has_submission and _candidate_provenance(other) == _candidate_provenance(action):
+                    return operation["operation_id"]
+        return None
 
     def create_action(self, action_id: str, action: str, actor: dict[str, Any],
                       target: dict[str, Any], candidate: dict[str, Any], selection_ref: Any,
@@ -243,7 +300,9 @@ class ActionStore(Store):
         state = action["execution_state"]
         step = {"not_started": "begin_action", "in_flight": "reconcile_before_retry",
                 "uncertain": "reconcile_before_retry", "verified": "return_observed_result",
-                "failed_before_submit": "review_before_new_attempt"}[state]
+                "failed_before_submit": "review_before_new_attempt",
+                "submitted_pending": "observe_pending_publication",
+                "not_published": "return_not_published_result"}[state]
         if action["action"] == "block" and action["scope"] == "live_test":
             step = "excluded_from_live_testing"
         return {"schema": _PACKET_SCHEMA, "local_only": True, "executes": False,
@@ -267,6 +326,9 @@ class ActionStore(Store):
             operations = self._operations(db, action_id)
             if operations and operations[-1]["state"] != "failed_before_submit":
                 raise StateError("action already submitted or unresolved; reconcile instead of repeating")
+            duplicate = self._pending_duplicate(db, action)
+            if duplicate is not None:
+                raise StateError(f"selected publication duplicates submitted operation {duplicate}; do not resubmit")
             if _local_attachments(action["candidate"]) != action.get("local_attachments", []):
                 raise StateError("selected local attachment bytes changed; inspect and obtain a new selection")
             guard = db.execute("SELECT * FROM delivery_guard WHERE singleton=1").fetchone()
@@ -284,13 +346,28 @@ class ActionStore(Store):
     @staticmethod
     def _evidence(action, outcome, evidence):
         if outcome not in _OUTCOMES:
-            raise ValidationError("outcome must be verified, uncertain, or failed_before_submit")
+            raise ValidationError("unsupported action outcome")
         evidence = _object(evidence, "evidence")
         _id(evidence.get("observation"), "evidence.observation")
         _reference(evidence.get("source_ref"), "evidence.source_ref")
         if outcome == "failed_before_submit" and evidence.get("positive_no_submit") is not True:
             raise ValidationError("failed_before_submit requires positive_no_submit true")
+        if outcome in {"submitted_pending", "not_published"}:
+            if action["action"] not in _PUBLICATION_ACTIONS:
+                raise ValidationError("publication outcomes apply only to publication actions")
+            if evidence.get("submission_observed") is not True or evidence.get("positive_no_submit") is True:
+                raise ValidationError("publication outcome requires submission_observed true and cannot claim no submission")
+            if outcome == "submitted_pending" and evidence.get("publication_state") != "pending":
+                raise ValidationError("submitted_pending requires publication_state pending")
+            if outcome == "not_published" and (evidence.get("publication_state") not in ("rejected", "removed", "withdrawn")
+                                               or evidence.get("terminal_observed") is not True):
+                raise ValidationError("not_published requires an observed rejection, removal or withdrawal")
         if outcome == "verified":
+            if "publication_state" in evidence and evidence["publication_state"] != "published":
+                raise ValidationError("verified evidence cannot describe a pending or unpublished result")
+            if evidence.get("submission_observed") is False or evidence.get("positive_no_submit") is True:
+                raise ValidationError("verified evidence cannot deny submission")
+        if outcome in {"verified", "submitted_pending", "not_published"}:
             expected = {"actor_id": action["actor"]["actor_id"], "actor_kind": action["actor"]["actor_kind"],
                         "destination_id": action["target"]["destination_id"], "surface": action["target"]["surface"],
                         "audience": action["target"]["audience"], "action": action["action"],
@@ -307,7 +384,7 @@ class ActionStore(Store):
                     expected["attachment_alt_texts"] = alt_texts
                 observations = evidence.get("attachment_observations")
                 if not isinstance(observations, list) or len(observations) != len(attachments):
-                    raise ValidationError("verified evidence requires one attachment observation per selected upload")
+                    raise ValidationError(f"{outcome} evidence requires one attachment observation per selected upload")
                 for observation in observations:
                     if not isinstance(observation, dict):
                         raise ValidationError("attachment observation must be an object")
@@ -323,7 +400,7 @@ class ActionStore(Store):
                 expected["platform_media_kind"] = action_data["platform_media"]["kind"]
             for field, value in expected.items():
                 if field not in evidence or evidence[field] != value:
-                    raise ValidationError(f"verified evidence.{field} does not match selected action")
+                    raise ValidationError(f"{outcome} evidence.{field} does not match selected action")
             _zoned_timestamp(evidence.get("observed_at"), "evidence.observed_at")
         return evidence
 
@@ -332,11 +409,17 @@ class ActionStore(Store):
             operation = self._operation(db, operation_id)
             if reconciliation_ref is None and operation["state"] != "in_flight":
                 raise StateError("record_outcome requires an in-flight operation")
-            if reconciliation_ref is not None and operation["state"] != "uncertain":
-                raise StateError("reconciliation requires an uncertain operation")
+            if reconciliation_ref is not None and operation["state"] not in {"uncertain", "submitted_pending"}:
+                raise StateError("reconciliation requires an uncertain or submitted-pending operation")
+            if operation["state"] == "submitted_pending" and outcome not in {"submitted_pending", "verified", "not_published"}:
+                raise StateError("a known submitted publication may only remain pending, publish, or be observed not published")
             action = self._action(db, operation["action_id"])
+            evidence = self._evidence(action, outcome, evidence)
+            if operation["state"] == "submitted_pending" and outcome == "verified" and (
+                    evidence.get("publication_state") != "published" or evidence.get("submission_observed") is not True):
+                raise ValidationError("pending publication requires explicit observed publication before verification")
             observation = {"outcome": outcome, "recorded_at": _now(),
-                           "evidence": self._evidence(action, outcome, evidence)}
+                           "evidence": evidence}
             if reconciliation_ref is not None:
                 observation["reconciliation_ref"] = _reference(reconciliation_ref, "reconciliation_ref")
             operation["observations"].append(observation)
@@ -353,7 +436,7 @@ class ActionStore(Store):
         return self._finish(operation_id, outcome, evidence)
 
     def reconcile(self, operation_id: str, outcome: str, evidence: Any, reconciliation_ref: Any) -> dict[str, Any]:
-        """Append an actual observation resolving uncertainty; never execute again."""
+        """Append an observation of uncertain dispatch or pending publication; never resend."""
         _reference(reconciliation_ref, "reconciliation_ref")
         return self._finish(operation_id, outcome, evidence, reconciliation_ref)
 

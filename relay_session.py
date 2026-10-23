@@ -25,6 +25,8 @@ DISPOSITIONS = {
     "NEED_CONTEXT", "NEED_RESEARCH", "HOLD", "QUIET", "DISAGREE",
 }
 NON_OUTPUT = {"NEED_CONTEXT", "NEED_RESEARCH", "HOLD", "QUIET", "DISAGREE"}
+RESULT_OUTCOMES = {"verified", "uncertain", "failed_before_submit", "submitted_pending", "not_published"}
+_PUBLICATION_DISPOSITIONS = {"REPLY", "ORIGINAL_POST", "IMAGE", "SHARE", "SHARE_WITH_COMMENTARY"}
 SESSION_METHODS = {
     "create_session", "prepare_turn", "begin_dispatch", "record_sent",
     "mark_uncertain", "reconcile_dispatch", "record_response", "select_candidate",
@@ -396,8 +398,8 @@ class SessionStore:
                       turn_id: str | None = None) -> dict[str, Any]:
         """Record an outcome for the selected candidate on the explicit or latest turn."""
         _string(result_id, "result_id")
-        if outcome not in {"verified", "uncertain", "failed_before_submit"}:
-            raise ValidationError("result outcome must be verified, uncertain, or failed_before_submit")
+        if outcome not in RESULT_OUTCOMES:
+            raise ValidationError("unsupported result outcome")
         result = {"result_id": result_id, "outcome": outcome,
                   "observation": _string(observation, "observation"),
                   "source_ref": _ref(source_ref, "source_ref"), "recorded_at": _now(),
@@ -405,6 +407,10 @@ class SessionStore:
         with self._write():
             session = self.inspect(session_id)
             turn, candidate = self._selection(session, turn_id)
+            if self._publication_result(session, turn, candidate) is not None:
+                raise StateError("this candidate already has a publication result; reconcile its latest result")
+            if outcome in {"submitted_pending", "not_published"} and self._candidate_disposition(turn, candidate) not in _PUBLICATION_DISPOSITIONS:
+                raise ValidationError("publication outcome requires a publication candidate")
             result.update({"turn_id": turn["turn_id"], "disposition": self._candidate_disposition(turn, candidate),
                            "candidate": candidate, "selection_ref": turn["selections"][-1]["selection_ref"]})
             try:
@@ -416,15 +422,15 @@ class SessionStore:
 
     def reconcile_result(self, session_id: str, prior_result_id: str, result_id: str,
                          outcome: str, observation: str, source_ref: Any) -> dict[str, Any]:
-        """Append actual outcome evidence to an uncertain result's original choice.
+        """Append actual outcome evidence to an uncertain or pending original choice.
 
         Returning uncertainty to the author, or receiving HOLD, does not erase
         the selected payload behind that result. This method observes an earlier
         action; it does not resubmit it or create fresh action authority.
         """
         _string(result_id, "result_id")
-        if outcome not in {"verified", "uncertain", "failed_before_submit"}:
-            raise ValidationError("result outcome must be verified, uncertain, or failed_before_submit")
+        if outcome not in RESULT_OUTCOMES:
+            raise ValidationError("unsupported result outcome")
         _string(observation, "observation")
         _ref(source_ref, "source_ref")
         with self._write():
@@ -432,8 +438,12 @@ class SessionStore:
             prior = next((item for item in session["results"] if item["result_id"] == prior_result_id), None)
             if prior is None:
                 raise NotFoundError("prior result not found for session")
-            if prior["outcome"] != "uncertain":
-                raise StateError("only an uncertain result needs outcome reconciliation")
+            if prior["outcome"] not in {"uncertain", "submitted_pending"}:
+                raise StateError("only an uncertain or pending result needs outcome reconciliation")
+            if prior["outcome"] == "submitted_pending" and outcome not in {"submitted_pending", "verified", "not_published"}:
+                raise StateError("an observed submission cannot become an unsent attempt or unknown dispatch")
+            if outcome in {"submitted_pending", "not_published"} and prior["disposition"] not in _PUBLICATION_DISPOSITIONS:
+                raise ValidationError("publication outcome requires a publication candidate")
             if any(item.get("reconciles_result_id") == prior_result_id for item in session["results"]):
                 raise StateError("this result already has newer evidence; reconcile its latest result")
             result = {**prior, "result_id": result_id, "reconciles_result_id": prior_result_id,
@@ -490,6 +500,10 @@ class SessionStore:
         if turn["state"] in steps:
             return packet | {"host_step": steps[turn["state"]]}
         superseded = {result["reconciles_result_id"] for result in session["results"] if "reconciles_result_id" in result}
+        pending = [result for result in session["results"] if result["result_id"] not in superseded
+                   and result["outcome"] == "submitted_pending"]
+        if pending:
+            packet["pending_publications"] = pending
         unreturned = [result for result in session["results"] if result["result_id"] not in superseded
                       and not any(item["result_id"] == result["result_id"] for item in session["turns"])]
         if unreturned:
@@ -498,6 +512,9 @@ class SessionStore:
             turn = self._choice_turn(session, turn_id)
             packet.update(turn=turn, execution_state=turn["state"])
         if turn["state"] == "closed":
+            if pending:
+                return packet | {"host_step": "observe_pending_publication", "content_state": "receipt_sent",
+                                 "output_required": False}
             return packet | {"host_step": "complete_without_response", "content_state": "receipt_sent",
                              "output_required": False}
         response = turn["response"]
@@ -512,9 +529,31 @@ class SessionStore:
         if turn["selected_candidate_id"] is None:
             return packet | {"host_step": "select_candidate_explicitly"}
         _, candidate = self._selection(session, turn_id)
+        recorded = self._publication_result(session, turn, candidate)
+        if recorded is not None:
+            steps = {"submitted_pending": "observe_pending_publication", "not_published": "respect_not_published",
+                     "verified": "respect_verified_publication"}
+            return packet | {"host_step": steps[recorded["outcome"]], "result": recorded, "execution_state": recorded["outcome"],
+                             "output_required": False}
         return packet | {"host_step": "carry_selected_candidate_under_applicable_authority",
                          "content_state": "selected_candidate", "candidate": candidate,
                          "disposition": self._candidate_disposition(turn, candidate)}
+
+    @staticmethod
+    def _publication_result(session, turn, candidate):
+        superseded = {r["reconciles_result_id"] for r in session["results"] if "reconciles_result_id" in r}
+        matching = [r for r in session["results"] if r["turn_id"] == turn["turn_id"]
+                    and r["candidate"]["candidate_id"] == candidate["candidate_id"]]
+        if not any(r["outcome"] in {"submitted_pending", "not_published"} for r in matching):
+            return None
+        # Resolving publication does not renew the original choice's send authority.
+        return next((r for r in reversed(matching) if r["result_id"] not in superseded
+                     and r["outcome"] in {"submitted_pending", "not_published", "verified"}), None)
+
+    @classmethod
+    def _check_publication_not_repeated(cls, session, turn, candidate):
+        if cls._publication_result(session, turn, candidate) is not None:
+            raise StateError("selected candidate was already submitted; observe its publication outcome, do not export a new send")
 
     def export_to_core_request(self, session_id: str, case_id: str, revision_id: str,
                                binding: dict[str, Any], account_policy: Any = None, *,
@@ -531,6 +570,7 @@ class SessionStore:
 
         session = self.inspect(session_id)
         turn, candidate = self._selection(session, turn_id)
+        self._check_publication_not_repeated(session, turn, candidate)
         disposition = self._candidate_disposition(turn, candidate)
         actions = {"REPLY": {"reply", "comment"}, "ORIGINAL_POST": {"post", "original_post"},
                    "IMAGE": {"post", "original_post", "reply", "comment"}}
@@ -576,6 +616,7 @@ class SessionStore:
         """
         session = self.inspect(session_id)
         turn, candidate = self._selection(session, turn_id)
+        self._check_publication_not_repeated(session, turn, candidate)
         disposition = self._candidate_disposition(turn, candidate)
         _string(action, "action")
         if action not in _DISPOSITION_ACTIONS.get(disposition, set()):

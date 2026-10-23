@@ -24,6 +24,8 @@ STREAMS = {"notifications", "messages"}
 SOURCE_METHODS = {"observe_source", "record_source_progress", "inspect_source", "pending_sources", "source_packet"}
 _STAGES = {"inspected", "relayed", "disposition", "result", "returned"}
 _TERMINAL_DISPOSITIONS = {"QUIET", "DISAGREE", "NO_ACTION"}
+_UNRESOLVED_OUTCOMES = {"uncertain", "submitted_pending"}
+_RESULT_OUTCOMES = _UNRESOLVED_OUTCOMES | {"verified", "not_published", "failed_before_submit"}
 
 
 def _timestamp(value: Any, label: str) -> datetime:
@@ -45,6 +47,8 @@ def _next(revision: dict[str, Any]) -> str:
     if result:
         if result["outcome"] == "uncertain":
             return "reconcile_before_retry"
+        if result["outcome"] == "submitted_pending" and "returned" in progress:
+            return "observe_pending_publication"
         return "complete" if "returned" in progress else "return_observed_result"
     disposition = progress.get("disposition", {}).get("disposition")
     if disposition in _TERMINAL_DISPOSITIONS:
@@ -175,7 +179,7 @@ class SourceStore:
         elif disposition is not None:
             raise ValidationError("disposition belongs to the disposition stage")
         if stage == "result":
-            if outcome not in {"verified", "uncertain", "failed_before_submit"}:
+            if outcome not in _RESULT_OUTCOMES:
                 raise ValidationError("unsupported source result outcome")
             event.update(result_ref=_ref(result_ref, "result_ref"), outcome=outcome)
         elif result_ref is not None or outcome is not None:
@@ -199,7 +203,7 @@ class SourceStore:
                 raise StateError("older progress cannot replace a later observation for this stage")
             if stage == "relayed" and (prior is None or prior["session_ref"] != event["session_ref"]):
                 result = progress.get("result")
-                if result and (result["outcome"] == "uncertain" or "returned" not in progress):
+                if result and (result["outcome"] in _UNRESOLVED_OUTCOMES or "returned" not in progress):
                     raise StateError("reconcile and return the existing result before relaying a new author turn")
                 if any(when < _timestamp(item["observed_at"], "prior progress observation")
                        for item in progress.values()):
@@ -212,6 +216,11 @@ class SourceStore:
                 raise StateError("record the actual result before its return")
             if stage == "returned" and when < _timestamp(progress["result"]["observed_at"], "result observation"):
                 raise StateError("a return observation cannot precede the current result")
+            if stage == "result" and prior:
+                if prior["outcome"] == "submitted_pending" and outcome in {"uncertain", "failed_before_submit"}:
+                    raise StateError("a submitted result cannot lose its observed submission")
+                if prior["outcome"] in {"verified", "not_published"} and outcome != prior["outcome"]:
+                    raise StateError("a terminal result requires a new source revision or relayed author turn")
             if stage == "result" and "returned" in progress:
                 # A reconciled result still needs its own actual return.
                 del progress["returned"]

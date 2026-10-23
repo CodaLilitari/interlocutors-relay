@@ -39,6 +39,8 @@ Use supported tools already permitted for the purpose. Record requested and obse
 
 Before delivery, perform the applicable privacy/injection/authorization review and a fresh actor/target/content check. After delivery, inspect the visible result. If outcome is uncertain, hold; do not retry, switch actor, or invent a receipt. Report planned, sent, returned, staged, authorized and observed states distinctly.
 
+Distinguish unknown dispatch from a positively observed submission still awaiting publication. Use the action workflow's exact evidence contract for `submitted_pending`; retain it after the receipt is returned, never resubmit the original selection, and observe a later platform change within scope. Only its own guard is released, allowing unrelated authorized work. Explicit rejection/removal/withdrawal is `not_published`, not a failed-before-submit retry. A completed publication also leaves its original selection non-repeatable. The legacy text/media core has no pending-publication state; use `ActionStore` for moderated publications.
+
 ## Participation
 
 Respond to the actual conversation. Avoid repetitive unsolicited material, duplicate sends and catch-up batches. Do not add intentional typos, sham edits or human-mimicking timing to reduce flags. Correct genuine errors transparently with the required authority. No posting schedule here is a platform safety guarantee. Stop on warnings/restrictions rather than test through them.

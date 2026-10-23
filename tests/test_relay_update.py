@@ -121,6 +121,59 @@ class RelayUpdateTests(unittest.TestCase):
         self.assert_preserved(result, "validation_failed")
         self.assertEqual(result["validation"], "failed")
 
+    def test_known_pending_publication_survives_install_and_reconciles_after_restart(self):
+        candidate_revision = self.advance()
+        self.session_db = self.base / "pending-session.sqlite"
+        self.delivery_db = self.base / "pending-delivery.sqlite"
+        session = SessionStore(self.session_db)
+        try:
+            session.create_session("pending-session", "synthetic-author", "originated", "Report a pending comment.")
+            session.prepare_turn("pending-session", "receipt", "Coda: Submitted; publication is pending.", expects_response=False)
+            session.begin_dispatch("pending-session", "receipt", "receipt-attempt")
+            session.record_sent("pending-session", "receipt", "saved-receipt", "Synthetic persisted receipt.")
+        finally:
+            session.close()
+        actions = ActionStore(self.delivery_db)
+        try:
+            action = actions.create_action("pending-comment", "comment",
+                {"actor_id": "example-profile", "actor_kind": "profile", "source_ref": "synthetic-actor"},
+                {"destination_id": "example-post", "surface": "post", "audience": "public", "reply_parent_id": "example-post"},
+                {"candidate_id": "selected-comment", "text": "Exact selected comment.", "source_ref": "synthetic-choice"},
+                "synthetic-selection", {"source_ref": "synthetic-authority"})
+            actions.begin_action("pending-comment", "pending-operation")
+            evidence = {"actor_id": "example-profile", "actor_kind": "profile", **action["target"],
+                "action": "comment", "action_sha256": action["action_sha256"], "text": "Exact selected comment.",
+                "observation": "Synthetic exact comment persisted with a Pending label.", "source_ref": "synthetic-pending-result",
+                "observed_at": "2026-10-23T12:00:00Z", "submission_observed": True, "publication_state": "pending"}
+            # Unknown dispatch still blocks installation; only positive bound evidence can release it.
+            actions.record_outcome("pending-operation", "uncertain",
+                {"observation": "Synthetic interrupted dispatch.", "source_ref": "synthetic-interruption"})
+        finally:
+            actions.close()
+        self.assert_preserved(self.run_update(apply=True), "runtime_busy")
+        actions = ActionStore(self.delivery_db)
+        try:
+            actions.reconcile("pending-operation", "submitted_pending", evidence, "synthetic-reopened-comment")
+            before_action = actions.inspect("pending-comment")
+        finally:
+            actions.close()
+        before_bytes = {p: p.read_bytes() for p in (self.session_db, self.delivery_db)}
+        result = self.run_update(apply=True)
+        self.assertEqual(result["status"], "updated", result)
+        self.assertEqual(result["new_revision"], candidate_revision)
+        self.assertEqual({p: p.read_bytes() for p in before_bytes}, before_bytes)
+        actions = ActionStore(self.delivery_db)
+        try:
+            self.assertEqual(actions.inspect("pending-comment"), before_action)
+            self.assertEqual(actions.action_packet("pending-comment")["host_step"], "observe_pending_publication")
+            self.assertEqual(actions.recover(), [])
+            published = evidence | {"publication_state": "published", "observed_at": "2026-10-23T13:00:00Z",
+                "observation": "Synthetic exact comment is visibly published.", "source_ref": "synthetic-published-result"}
+            result = actions.reconcile("pending-operation", "verified", published, "synthetic-later-observation")
+            self.assertEqual([o["outcome"] for o in result["observations"]], ["uncertain", "submitted_pending", "verified"])
+        finally:
+            actions.close()
+
     def test_dirty_tracked_and_untracked_files_are_preserved_without_fetch(self):
         self.advance()
         (self.repo / "runtime.py").write_text("VALUE = 7\n", encoding="utf-8")

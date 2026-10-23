@@ -158,6 +158,87 @@ class RelaySessionTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             self.store.create_session("ambiguous", {"thread_id": "example-thread"}, "originated", "Request")
 
+    def test_pending_publication_survives_return_hold_and_restart_without_resend(self):
+        self.selected()
+        self.store.record_result("private", "unknown", "uncertain", "Submission result unclear.", "timeout")
+        self.send("return-unknown", purpose="return_result", result_id="unknown")
+        self.answer("HOLD", turn="return-unknown")
+        pending = self.store.reconcile_result("private", "unknown", "pending", "submitted_pending",
+                                              "Reopened exact submitted comment marked Pending.", "pending-action-receipt")
+        self.assertEqual(pending["candidate"]["candidate_id"], "a")
+        self.assertEqual(pending["turn_id"], "t1")
+        self.assertEqual(self.store.return_result_packet("private", "pending")["execution_state"], "submitted_pending")
+        self.store.prepare_turn("private", "return-pending", "Coda: Submitted, Pending; not published.",
+                                purpose="return_result", result_id="pending", expects_response=False)
+        self.store.begin_dispatch("private", "return-pending", "pending-return-attempt")
+        self.store.record_sent("private", "return-pending", "saved-pending-return", "Actual receipt saved.")
+        self.store.close()
+        self.store = SessionStore(self.path)
+        self.assertEqual(self.store.next_step_packet("private")["host_step"], "observe_pending_publication")
+        step = self.store.next_step_packet("private", turn_id="t1")
+        self.assertEqual(step["host_step"], "observe_pending_publication")
+        self.assertFalse(step["output_required"])
+        with self.assertRaisesRegex(StateError, "reconcile its latest result"):
+            self.store.record_result("private", "reset", "verified", "Unlinked replacement.", "bad-ref", turn_id="t1")
+        for bridge in (
+            lambda: self.store.export_to_action_request("private", "duplicate", "comment", {}, {}, {}, turn_id="t1"),
+            lambda: self.store.export_to_core_request("private", "duplicate", "r1", {}, turn_id="t1"),
+        ):
+            with self.assertRaisesRegex(StateError, "already submitted"):
+                bridge()
+        for outcome in ("uncertain", "failed_before_submit"):
+            with self.assertRaises(StateError):
+                self.store.reconcile_result("private", "pending", "invalid", outcome, "Cannot undo a known send.", "bad-ref")
+        # A different selected candidate can still be carried under its own authority.
+        self.store.select_candidate("private", "t1", "b", "Distinct selected action")
+        self.assertEqual(self.store.next_step_packet("private", turn_id="t1")["host_step"],
+                         "carry_selected_candidate_under_applicable_authority")
+        terminal = self.store.reconcile_result("private", "pending", "rejected", "not_published",
+                                               "Platform explicitly rejected the original comment.", "rejection-receipt")
+        self.assertEqual(terminal["candidate"]["candidate_id"], "a")
+        self.assertEqual([r["outcome"] for r in self.store.inspect("private")["results"]],
+                         ["uncertain", "submitted_pending", "not_published"])
+        self.assertEqual(self.store.next_step_packet("private")["result_id"], "rejected")
+        self.send("return-rejected", purpose="return_result", result_id="rejected")
+        self.answer("HOLD", turn="return-rejected")
+        self.store.select_candidate("private", "t1", "a", "Original choice remains held")
+        self.assertEqual(self.store.next_step_packet("private", turn_id="t1")["host_step"], "respect_not_published")
+        with self.assertRaisesRegex(StateError, "already submitted"):
+            self.store.export_to_action_request("private", "duplicate-terminal", "comment", {}, {}, {}, turn_id="t1")
+        with self.assertRaises(StateError):
+            self.store.reconcile_result("private", "rejected", "retry", "submitted_pending", "No new submission.", "bad-ref")
+
+    def test_pending_observation_chain_requires_latest_result_and_keeps_original_authority(self):
+        self.selected()
+        self.store.record_result("private", "p1", "submitted_pending", "Pending on first reopen.", "first-ref",
+                                  action_authority="original-user-scope")
+        result = self.store.reconcile_result("private", "p1", "p2", "submitted_pending",
+                                            "Still pending on a later inspection.", "second-ref")
+        self.assertEqual(result["action_authority"], "original-user-scope")
+        with self.assertRaises(StateError):
+            self.store.reconcile_result("private", "p1", "stale", "verified", "Stale chain.", "bad-ref")
+        self.store.reconcile_result("private", "p2", "published", "verified", "Visible exact published result.", "publication-ref")
+        self.store.prepare_turn("private", "published-return", "Coda: The selected comment is published.",
+                                purpose="return_result", result_id="published", expects_response=False)
+        self.store.begin_dispatch("private", "published-return", "published-return-attempt")
+        self.store.record_sent("private", "published-return", "saved-published-return", "Observed saved receipt.")
+        step = self.store.next_step_packet("private", turn_id="t1")
+        self.assertEqual(step["host_step"], "respect_verified_publication")
+        self.assertFalse(step["output_required"])
+        for bridge in (lambda: self.store.export_to_action_request("private", "repeat", "comment", {}, {}, {}, turn_id="t1"),
+                       lambda: self.store.export_to_core_request("private", "repeat", "r1", {}, turn_id="t1")):
+            with self.assertRaises(StateError):
+                bridge()
+        self.assertEqual(self.store.return_result_packet("private", "published")["result"]["candidate"]["text"],
+                         "A shorter reply.")
+
+    def test_publication_outcome_cannot_label_a_reaction_pending(self):
+        self.send()
+        self.answer("REACT", [{"candidate_id": "reaction", "source_ref": "choice", "action_data": {"reaction": "WOW"}}])
+        self.store.select_candidate("private", "t1", "reaction", "selected-reaction")
+        with self.assertRaises(ValidationError):
+            self.store.record_result("private", "invalid", "submitted_pending", "Not a publication.", "ref")
+
     def test_quiet_hold_disagreement_and_requests_are_first_class(self):
         for index, disposition in enumerate(("QUIET", "HOLD", "DISAGREE", "NEED_CONTEXT", "NEED_RESEARCH")):
             turn = f"t{index}"

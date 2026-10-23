@@ -158,6 +158,115 @@ class RelaySourceTests(unittest.TestCase):
         self.progress("returned", minute=8)
         self.assertEqual(self.pending(), [])
 
+    def test_returned_pending_publication_stays_pending_across_reopen_and_unread_changes(self):
+        self.observe()
+        self.progress("relayed", session_ref="selected-author-turn")
+        self.progress("result", result_ref="visible-pending-result", outcome="submitted_pending", minute=2)
+        self.assertEqual(self.pending()[0]["host_step"], "return_observed_result")
+        self.progress("returned", minute=3)
+        self.assertEqual(self.pending()[0]["host_step"], "observe_pending_publication")
+        before = self.store.inspect_source("example-profile", "messages", "observed-item")
+        self.progress("result", result_ref="visible-pending-result", outcome="submitted_pending", minute=2)
+        self.assertEqual(self.store.inspect_source("example-profile", "messages", "observed-item"), before)
+        self.observe(unread=True, minute=4)
+        self.store.close()
+        self.store = SourceStore(self.path)
+        packet = self.store.source_packet("example-profile", "messages")
+        self.assertFalse(packet["executes"])
+        self.assertEqual(len(packet["items"]), 1)
+        self.assertEqual(packet["items"][0]["host_step"], "observe_pending_publication")
+        self.assertEqual(packet["items"][0]["revision"]["progress"]["result"]["outcome"], "submitted_pending")
+
+    def test_new_author_turn_cannot_erase_returned_pending_publication(self):
+        self.observe()
+        self.progress("relayed", session_ref="selected-author-turn")
+        self.progress("result", result_ref="visible-pending-result", outcome="submitted_pending", minute=2)
+        self.progress("returned", minute=3)
+        before = self.store.inspect_source("example-profile", "messages", "observed-item")
+        with self.assertRaises(StateError):
+            self.progress("relayed", session_ref="new-turn", minute=4)
+        self.assertEqual(self.store.inspect_source("example-profile", "messages", "observed-item"), before)
+        self.progress("relayed", session_ref="selected-author-turn", minute=4)
+        self.assertEqual(self.pending()[0]["host_step"], "observe_pending_publication")
+        self.progress("disposition", disposition="NO_ACTION", minute=5)
+        self.assertEqual(self.pending()[0]["host_step"], "observe_pending_publication")
+
+    def test_pending_publication_cannot_regress_to_unsubmitted_or_uncertain(self):
+        self.observe()
+        self.progress("result", result_ref="visible-pending-result", outcome="submitted_pending", minute=2)
+        self.progress("returned", minute=3)
+        before = self.store.inspect_source("example-profile", "messages", "observed-item")
+        for outcome in ("failed_before_submit", "uncertain"):
+            with self.subTest(outcome=outcome), self.assertRaises(StateError):
+                self.progress("result", result_ref="regressive-result", outcome=outcome, minute=4)
+            self.assertEqual(self.store.inspect_source("example-profile", "messages", "observed-item"), before)
+
+    def test_pending_reobservation_needs_new_return_without_losing_earlier_receipt(self):
+        self.observe()
+        self.progress("result", result_ref="first-pending-observation", outcome="submitted_pending", minute=2)
+        self.progress("returned", minute=3)
+        self.progress("result", result_ref="later-pending-observation", outcome="submitted_pending", minute=4)
+        self.assertEqual(self.pending()[0]["host_step"], "return_observed_result")
+        self.progress("returned", minute=5)
+        revision = self.pending()[0]["revision"]
+        self.assertEqual(self.pending()[0]["host_step"], "observe_pending_publication")
+        self.assertEqual([event["result_ref"] for event in revision["progress_history"] if event["stage"] == "result"],
+                         ["first-pending-observation", "later-pending-observation"])
+        self.assertEqual(len([event for event in revision["progress_history"] if event["stage"] == "returned"]), 2)
+
+    def test_resolved_pending_publication_requires_fresh_return_and_preserves_new_material_context(self):
+        for terminal in ("verified", "not_published"):
+            with self.subTest(terminal=terminal):
+                source = SourceStore(Path(self.temp.name) / f"{terminal}.sqlite")
+                try:
+                    source.observe_source("example-profile", "profile", "messages", "item", "source", "first", "2026-10-23T15:00:00Z")
+                    def progress(stage, minute, **fields):
+                        return source.record_source_progress("example-profile", "messages", "item", 1, stage,
+                                                             "observed-evidence", f"2026-10-23T15:{minute:02d}:00Z", **fields)
+                    progress("relayed", 1, session_ref="selected-turn")
+                    progress("result", 2, result_ref="pending-observation", outcome="submitted_pending")
+                    progress("returned", 3)
+                    source.observe_source("example-profile", "profile", "messages", "item", "new-source", "new material reply", "2026-10-23T15:04:00Z")
+                    pending = source.pending_sources("example-profile", "messages")
+                    self.assertEqual([item["host_step"] for item in pending], ["observe_pending_publication", "inspect_source"])
+                    progress("result", 5, result_ref="terminal-observation", outcome=terminal)
+                    pending = source.pending_sources("example-profile", "messages")
+                    self.assertEqual([item["host_step"] for item in pending], ["return_observed_result", "inspect_source"])
+                    with self.assertRaises(StateError):
+                        progress("returned", 3)
+                    with self.assertRaises(StateError):
+                        progress("relayed", 6, session_ref="new-author-turn")
+                    progress("returned", 7)
+                    pending = source.pending_sources("example-profile", "messages")
+                    self.assertEqual([item["revision"]["revision"] for item in pending], [2])
+                    self.assertEqual(pending[0]["revision"]["content"], "new material reply")
+                    saved = source.inspect_source("example-profile", "messages", "item")["revisions"]
+                    self.assertEqual(saved[0]["progress"]["result"]["outcome"], terminal)
+                    self.assertEqual([event["outcome"] for event in saved[0]["progress_history"] if event["stage"] == "result"],
+                                     ["submitted_pending", terminal])
+                    self.assertEqual(saved[1]["progress"], {})
+                finally:
+                    source.close()
+
+    def test_terminal_publication_result_cannot_reopen_without_new_author_turn(self):
+        self.observe()
+        self.progress("relayed", session_ref="first-turn")
+        self.progress("result", result_ref="visible-rejection", outcome="not_published", minute=2)
+        self.progress("returned", minute=3)
+        self.assertEqual(self.pending(), [])
+        before = self.store.inspect_source("example-profile", "messages", "observed-item")
+        for outcome in ("submitted_pending", "uncertain", "failed_before_submit", "verified"):
+            with self.subTest(outcome=outcome), self.assertRaises(StateError):
+                self.progress("result", result_ref="reopened-result", outcome=outcome, minute=4)
+            self.assertEqual(self.store.inspect_source("example-profile", "messages", "observed-item"), before)
+        self.progress("relayed", session_ref="explicit-new-author-turn", minute=5)
+        self.progress("result", result_ref="new-turn-pending-result", outcome="submitted_pending", minute=6)
+        self.progress("returned", minute=7)
+        self.assertEqual(self.pending()[0]["host_step"], "observe_pending_publication")
+        history = self.pending()[0]["revision"]["progress_history"]
+        self.assertEqual([event["outcome"] for event in history if event["stage"] == "result"],
+                         ["not_published", "submitted_pending"])
+
     def test_fingerprint_uses_content_not_object_order_or_source_reference(self):
         first = self.store.observe_source("example-profile", "profile", "messages", "item", "ref-a",
                                          {"text": "Hello", "media": []}, "2026-10-23T15:00:00Z")

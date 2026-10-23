@@ -56,6 +56,13 @@ class RelayActionTests(unittest.TestCase):
                 for index in range(len(attachments))]
         return evidence
 
+    def pending_evidence(self, action_id="a1"):
+        return self.evidence(action_id) | {"submission_observed": True, "publication_state": "pending",
+                                         "observation": "Exact selected comment visibly persists with a Pending label."}
+
+    def create_publication(self, action_id="a1", **kwargs):
+        return self.create(action_id, "comment", destination=target("post", "public", "parent-post"), **kwargs)
+
     def core_case(self, core, case="core-case"):
         core.create_case(case, {"author_route": "example-thread", "actor_id": "example-page", "actor_kind": "page",
                                "destination_id": "example-target", "action": "comment", "context_ref": "actual-source"})
@@ -315,6 +322,258 @@ class RelayActionTests(unittest.TestCase):
         for method in ("create_case", "authorize", "begin_delivery", "close", "_db", ["inspect"]):
             with self.subTest(method=method), self.assertRaises(ValidationError):
                 apply_action_request(self.store, {"method": method})
+
+    def test_pending_survives_restart_and_releases_guard_without_allowing_repeat(self):
+        self.create_publication()
+        self.store.begin_action("a1", "op1")
+        self.store.close()
+        self.store = ActionStore(self.db)
+        self.assertEqual(self.store.recover(), ["op1"])
+        self.store.reconcile("op1", "submitted_pending", self.pending_evidence(), "reopened-exact-comment")
+        self.store.close()
+        self.store = ActionStore(self.db)
+        self.assertEqual(self.store.recover(), [])
+        packet = self.store.action_packet("a1")
+        self.assertEqual(packet["execution_state"], "submitted_pending")
+        self.assertEqual(packet["host_step"], "observe_pending_publication")
+        self.assertFalse(packet["executes"])
+        self.assertFalse(self.store.begin_action("a1", "op1")["newly_claimed"])
+        with self.assertRaises(StateError):
+            self.store.begin_action("a1", "repeat")
+        self.create("unrelated-message")
+        self.assertTrue(self.store.begin_action("unrelated-message", "message-op")["newly_claimed"])
+        observations = packet["record"]["operations"][0]["observations"]
+        self.assertEqual([item["outcome"] for item in observations], ["uncertain", "submitted_pending"])
+
+    def test_pending_requires_positive_exact_evidence_and_malformed_evidence_keeps_guard(self):
+        self.create_publication(selected=candidate("Exact paragraph.\nSecond line."))
+        self.store.begin_action("a1", "op1")
+        self.create("other")
+        evidence = self.pending_evidence()
+        for field in ("actor_id", "actor_kind", "destination_id", "surface", "audience", "reply_parent_id",
+                      "action", "action_sha256", "text", "observed_at", "source_ref", "observation",
+                      "submission_observed", "publication_state"):
+            missing = dict(evidence)
+            del missing[field]
+            with self.subTest(missing=field), self.assertRaises(ValidationError):
+                self.store.record_outcome("op1", "submitted_pending", missing)
+        for wrong in ({"actor_id": "other-actor"}, {"destination_id": "other-post"},
+                      {"reply_parent_id": "other-parent"}, {"action_sha256": "0" * 64},
+                      {"text": evidence["text"] + "\n"}, {"publication_state": "published"},
+                      {"submission_observed": False}, {"submission_observed": 1},
+                      {"positive_no_submit": True}, {"observed_at": "2026-10-23T12:00:00"}):
+            with self.subTest(wrong=wrong), self.assertRaises(ValidationError):
+                self.store.record_outcome("op1", "submitted_pending", evidence | wrong)
+        self.assertEqual(self.store.inspect("a1")["operations"][0]["observations"], [])
+        with self.assertRaises(StateError):
+            self.store.begin_action("other", "op2")
+        self.store.record_outcome("op1", "uncertain", {"source_ref": "interrupted-view", "observation": "Result not yet inspected."})
+        with self.assertRaises(ValidationError):
+            self.store.reconcile("op1", "submitted_pending", evidence | {"text": "wrong"}, "new-view")
+        with self.assertRaises(StateError):
+            self.store.begin_action("other", "op2")
+        self.assertEqual(self.store.inspect("a1")["execution_state"], "uncertain")
+        self.store.reconcile("op1", "submitted_pending", evidence, "new-view")
+        self.assertTrue(self.store.begin_action("other", "op2")["newly_claimed"])
+
+    def test_pending_media_requires_actual_selected_uploads_and_native_asset(self):
+        path = Path(self.temp.name) / "selected.png"
+        path.write_bytes(b"synthetic-selected-upload")
+        self.create_publication(selected=candidate("Caption", attachments=[{"ref": str(path), "alt_text": "Exact alt text."}],
+                                                  data={"platform_media": {"kind": "gif", "ref": "native-chosen-gif"}}))
+        self.store.begin_action("a1", "op1")
+        evidence = self.pending_evidence() | {"platform_media_ref": "native-chosen-gif", "platform_media_kind": "gif"}
+        for wrong in ({"attachment_refs": []}, {"attachment_alt_texts": ["other text"]},
+                      {"attachment_observations": []}, {"platform_media_ref": "other-gif"},
+                      {"platform_media_kind": "image"}):
+            with self.subTest(wrong=wrong), self.assertRaises(ValidationError):
+                self.store.record_outcome("op1", "submitted_pending", evidence | wrong)
+        self.store.record_outcome("op1", "submitted_pending", evidence)
+
+    def test_pending_applies_only_to_publications_and_share_source_is_bound(self):
+        publications = ("post", "original_post", "comment", "reply", "share", "share_with_commentary")
+        for action in publications:
+            with self.subTest(action=action):
+                action_id, operation_id = f"pending-{action}", f"op-{action}"
+                data = {"source_ref": "selected-shared-post"} if action.startswith("share") else {}
+                destination = target("post", "public", "parent-post") if action in {"comment", "reply"} else target("profile_timeline", "public")
+                selected = candidate("" if action == "share" else f"Content for {action}", data=data)
+                selected["candidate_id"] = action_id
+                self.create(action_id, action, selected=selected, destination=destination)
+                self.store.begin_action(action_id, operation_id)
+                evidence = self.pending_evidence(action_id)
+                if action.startswith("share"):
+                    with self.assertRaises(ValidationError):
+                        self.store.record_outcome(operation_id, "submitted_pending", evidence)
+                    evidence["shared_source_ref"] = "selected-shared-post"
+                self.store.record_outcome(operation_id, "submitted_pending", evidence)
+        nonpublications = [("message", candidate("Exact message"), target(), {}),
+                           ("react", candidate(data={"reaction": "LOVE"}), target("post", "public"), {}),
+                           ("block", candidate(), target("profile", "account"), {}),
+                           ("friend_request", candidate(), target("profile", "recipient"),
+                            {"friend_request_permission": {"approved": True, "granted_by": "user",
+                             "actor_id": "example-profile", "destination_id": "example-target",
+                             "rationale": "Specific invited test", "source_ref": "specific-user-permission"}})]
+        for action, selected, destination, kwargs in nonpublications:
+            with self.subTest(action=action):
+                action_id, operation_id = f"not-publication-{action}", f"op-{action}"
+                self.create(action_id, action, selected=selected, destination=destination, **kwargs)
+                self.store.begin_action(action_id, operation_id)
+                for outcome, extra in (("submitted_pending", {}),
+                                       ("not_published", {"publication_state": "rejected", "terminal_observed": True})):
+                    with self.assertRaises(ValidationError):
+                        self.store.record_outcome(operation_id, outcome, self.pending_evidence(action_id) | extra)
+                self.store.record_outcome(operation_id, "failed_before_submit",
+                                          {"source_ref": "synthetic-no-dispatch", "observation": "No UI was operated.", "positive_no_submit": True})
+
+    def test_pending_observations_and_resolution_preserve_another_actions_guard(self):
+        self.create_publication()
+        self.store.begin_action("a1", "op1")
+        self.store.record_outcome("op1", "submitted_pending", self.pending_evidence())
+        core = Store(self.db)
+        try:
+            self.core_case(core)
+            self.assertTrue(core.begin_delivery("core-case", "r1", "core-op")["newly_claimed"])
+            other = ActionStore(self.db)
+            try:
+                other.reconcile("op1", "submitted_pending", self.pending_evidence() | {"source_ref": "second-pending-view"}, "second-check")
+                for invalid in ("failed_before_submit", "uncertain"):
+                    with self.subTest(outcome=invalid), self.assertRaises(StateError):
+                        other.reconcile("op1", invalid, self.pending_evidence() | {"positive_no_submit": True}, "invalid-change")
+                for contradictory in (self.pending_evidence(), self.evidence(),
+                                      self.evidence() | {"publication_state": "rejected"},
+                                      self.evidence() | {"submission_observed": False},
+                                      self.evidence() | {"publication_state": "published"}):
+                    with self.assertRaises(ValidationError):
+                        other.reconcile("op1", "verified", contradictory, "not-published-proof")
+                other.reconcile("op1", "verified", self.evidence() | {"publication_state": "published", "submission_observed": True}, "visible-published-result")
+                self.create("other")
+                with self.assertRaises(StateError):
+                    other.begin_action("other", "other-op")
+                guard = other._db.execute("SELECT operation_id FROM delivery_guard WHERE singleton=1").fetchone()
+                self.assertEqual(guard["operation_id"], "core-op")
+                outcomes = [item["outcome"] for item in other.inspect("a1")["operations"][0]["observations"]]
+                self.assertEqual(outcomes, ["submitted_pending", "submitted_pending", "verified"])
+            finally:
+                other.close()
+        finally:
+            core.close()
+
+    def test_visible_rejection_is_terminal_not_a_failed_submission_or_retry(self):
+        self.create_publication()
+        self.store.begin_action("a1", "op1")
+        self.store.record_outcome("op1", "submitted_pending", self.pending_evidence())
+        rejected = self.pending_evidence() | {"publication_state": "rejected", "terminal_observed": True,
+                                             "source_ref": "visible-rejection", "observation": "Exact submitted comment is explicitly rejected."}
+        for wrong in ({"publication_state": "missing"}, {"publication_state": "pending"},
+                      {"publication_state": ["rejected"]},
+                      {"terminal_observed": False}, {"submission_observed": False}, {"text": "different"}):
+            with self.subTest(wrong=wrong), self.assertRaises(ValidationError):
+                self.store.reconcile("op1", "not_published", rejected | wrong, "rejection-check")
+        operation = self.store.reconcile("op1", "not_published", rejected, "rejection-check")
+        self.assertEqual(operation["state"], "not_published")
+        self.assertEqual(self.store.action_packet("a1")["host_step"], "return_not_published_result")
+        with self.assertRaises(StateError):
+            self.store.begin_action("a1", "op2")
+        self.assertFalse(self.store.begin_action("a1", "op1")["newly_claimed"])
+        with self.assertRaises(StateError):
+            self.store.reconcile("op1", "failed_before_submit", rejected | {"positive_no_submit": True}, "contradictory-retry")
+        self.create_publication("same-candidate-new-id")
+        with self.assertRaises(StateError):
+            self.store.begin_action("same-candidate-new-id", "cloned-op")
+        new_choice = candidate("Exact selected message.") | {"candidate_id": "new-author-choice", "response_ref": "new-author-response"}
+        self.create_publication("new-selection", selected=new_choice)
+        self.assertTrue(self.store.begin_action("new-selection", "new-selection-op")["newly_claimed"])
+
+    def test_pending_clones_cannot_escape_by_changing_provenance_but_distinct_actions_work(self):
+        self.create_publication()
+        self.store.begin_action("a1", "op1")
+        self.store.record_outcome("op1", "submitted_pending", self.pending_evidence())
+        clone = candidate("Exact selected message.") | {"candidate_id": "renamed", "source_ref": "different-source",
+                                                         "response_ref": "different-response"}
+        self.create_publication("cloned-id", selected=clone, acting=actor() | {"observed_at": "2026-10-23T20:00:00Z"})
+        with self.assertRaisesRegex(StateError, "duplicates submitted operation"):
+            self.store.begin_action("cloned-id", "cloned-op")
+        for action_id, selected, acting, destination in (
+            ("other-content", clone | {"text": "A different intended comment."}, actor(), target("post", "public", "parent-post")),
+            ("other-actor", clone, actor("page"), target("post", "public", "parent-post")),
+            ("other-target", clone, actor(), target("post", "public", "different-parent") | {"destination_id": "other-post"}),
+        ):
+            with self.subTest(action_id=action_id):
+                self.create(action_id, "comment", selected=selected, acting=acting, destination=destination)
+                self.assertTrue(self.store.begin_action(action_id, action_id + "-op")["newly_claimed"])
+                self.store.record_outcome(action_id + "-op", "failed_before_submit",
+                                          {"source_ref": "synthetic-only", "observation": "No real dispatch occurred.", "positive_no_submit": True})
+
+    def test_pending_image_clone_matches_bytes_not_file_name_or_candidate_id(self):
+        first = Path(self.temp.name) / "first.png"
+        second = Path(self.temp.name) / "renamed.png"
+        first.write_bytes(b"same-selected-media")
+        second.write_bytes(first.read_bytes())
+        self.create_publication(selected=candidate(attachments=[{"ref": str(first)}]))
+        self.store.begin_action("a1", "op1")
+        self.store.record_outcome("op1", "submitted_pending", self.pending_evidence())
+        selected = candidate(attachments=[{"ref": str(second)}]) | {"candidate_id": "fresh-id", "source_ref": "fresh-source"}
+        self.create_publication("renamed-clone", selected=selected)
+        with self.assertRaises(StateError):
+            self.store.begin_action("renamed-clone", "repeat-op")
+
+    def test_pending_aliases_cannot_repeat_but_outcome_surface_stays_exact(self):
+        aliases = [
+            ("comment", "post", "comment", "feed_item", "parent-post", "profile"),
+            ("comment", "post", "reply", "comment", "parent-comment", "profile"),
+            ("post", "profile_timeline", "original_post", "profile", None, "profile"),
+            ("original_post", "page_timeline", "post", "page", None, "page"),
+            ("share", "profile_timeline", "share_with_commentary", "profile", None, "profile"),
+            ("share_with_commentary", "page", "share", "page_timeline", None, "page"),
+        ]
+        for index, (original_action, original_surface, clone_action, clone_surface, parent, kind) in enumerate(aliases):
+            with self.subTest(original=original_action, clone=clone_action, surface=clone_surface):
+                original_id, clone_id = f"original-{index}", f"clone-{index}"
+                destination = target(original_surface, "public", parent) | {"destination_id": f"stable-target-{index}"}
+                data = {"source_ref": "exact-shared-source"} if original_action.startswith("share") else {}
+                selected = candidate("Exact selected content.", data=data) | {"candidate_id": original_id}
+                self.create(original_id, original_action, acting=actor(kind), destination=destination, selected=selected)
+                # A clone made before dispatch must also be rejected at claim time.
+                cloned = selected | {"candidate_id": clone_id, "source_ref": "fresh-source", "response_ref": "fresh-response"}
+                self.create(clone_id, clone_action, acting=actor(kind), destination=destination | {"surface": clone_surface}, selected=cloned)
+                operation_id = original_id + "-op"
+                self.store.begin_action(original_id, operation_id)
+                evidence = self.pending_evidence(original_id)
+                if data:
+                    evidence["shared_source_ref"] = data["source_ref"]
+                with self.assertRaises(ValidationError):
+                    self.store.record_outcome(operation_id, "submitted_pending", evidence | {"surface": clone_surface})
+                self.store.record_outcome(operation_id, "submitted_pending", evidence)
+                with self.assertRaisesRegex(StateError, "duplicates submitted operation"):
+                    self.store.begin_action(clone_id, clone_id + "-op")
+                self.assertEqual(self.store.inspect(clone_id)["operations"], [])
+                self.assertEqual(self.store.inspect(original_id)["target"]["surface"], original_surface)
+
+    def test_resolved_original_candidate_stays_blocked_through_surface_alias(self):
+        self.create_publication()
+        self.store.begin_action("a1", "op1")
+        self.store.record_outcome("op1", "submitted_pending", self.pending_evidence())
+        self.store.reconcile("op1", "verified", self.evidence() | {"publication_state": "published", "submission_observed": True},
+                             "observed-publication")
+        self.create("alias", "reply", destination=target("feed_item", "public", "parent-post"))
+        with self.assertRaisesRegex(StateError, "duplicates submitted operation"):
+            self.store.begin_action("alias", "alias-op")
+
+    def test_pending_share_does_not_block_a_distinct_selected_source_or_commentary(self):
+        selected = candidate("Exact commentary.", data={"source_ref": "original-shared-source"})
+        self.create("original", "share_with_commentary", destination=target("profile_timeline", "public"), selected=selected)
+        self.store.begin_action("original", "original-op")
+        self.store.record_outcome("original-op", "submitted_pending",
+                                  self.pending_evidence("original") | {"shared_source_ref": "original-shared-source"})
+        for action_id, text, source in (("new-source", "Exact commentary.", "different-shared-source"),
+                                       ("new-commentary", "Different selected commentary.", "original-shared-source")):
+            with self.subTest(action_id=action_id):
+                choice = candidate(text, data={"source_ref": source}) | {"candidate_id": action_id, "response_ref": "new-author-response"}
+                self.create(action_id, "share_with_commentary", destination=target("profile", "public"), selected=choice)
+                self.assertTrue(self.store.begin_action(action_id, action_id + "-op")["newly_claimed"])
+                self.store.record_outcome(action_id + "-op", "failed_before_submit",
+                                          {"source_ref": "synthetic-only", "observation": "No dispatch occurred.", "positive_no_submit": True})
 
 
 if __name__ == "__main__":

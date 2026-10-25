@@ -28,11 +28,13 @@ The interlocutor can return a natural reply with an unambiguous disposition and 
 
 The interlocutor may originate a topic, research question, image idea, or private reflection without an incoming social object. A manually opened or separately authorized scheduled window is an occasion, not a command to produce something. An operator suggestion remains the operator's until the interlocutor adopts it. Keep research and private-room material separate from publication candidates.
 
-Useful dispositions include reply, message, react, like Page, follow Page, share, share with commentary, original post, image, block, friend request, need context, need research, hold, quiet and disagree. These are proposals or decisions, not permission to execute the associated platform action. Quiet is a completed decision. Follow-up reactions or replies may return as a new scoped packet when permitted; a technical delivery receipt need not end the conversation. The [action workflow](actions.md) retains nontext selections and explains actor-specific capability checks, no-op reactions and Page relationships, and relationship-action limits.
+Useful dispositions include reply, message, react, like Page, follow Page, edit or delete own content, hide a feed item or source, unfollow, share, share with commentary, original post, image, block, friend request, need context, need research, hold, quiet and disagree. These are proposals or decisions, not permission to execute the associated platform action. Quiet is a completed decision. Follow-up reactions or replies may return as a new scoped packet when permitted; a technical delivery receipt need not end the conversation. The [action workflow](actions.md) retains nontext selections and explains actor-specific capability checks, no-op reactions and Page relationships, content revisions, and moderation limits.
 
 Keep content state, action authority, and execution state distinct. For example: endorsed for staging / no action authority / staged. Preserve wording origin even when another participant later adopts it: original author, suggested edits, adoption and collaborative contribution are different evidence.
 
 ## Delivery is a separate step
+
+For private setup, bind exact stable account IDs and exclusions from trusted human direction and visible account evidence. Approval of content does not create an actor exception. Drafting may continue with unresolved IDs; execution cannot.
 
 Before any actual external mutation, the primary operator must independently check current human authorization, correct actor, exact target, audience, reply parent, text/media and platform restrictions. The local core cannot perform those checks. A stored reference named `authority_ref` is an attestation, not the source of permission.
 
@@ -41,6 +43,18 @@ Create a local intent record before the side effect. Only the newly claimed atte
 After a real action, compare the visible result with the intended actor, destination, parent, audience, text and media. Preserve the result reference and observed time. Local `verified` means an operator recorded matching evidence; the core has not authenticated that observation. A synthetic result must be labeled synthetic, never mixed with a live receipt.
 
 An uncertain operation can be reconciled only from new explicit evidence. A positively established failure before submission still consumes the old authorization. Reconciliation never submits, edits, deletes, or retries anything.
+
+## Corrections and boundaries
+
+Stage public text separately from private comments. UTF-8 content and content plus a file-boundary LF are different representations; state which one a digest covers. Do not trim, normalize Unicode, replace punctuation or convert line endings while calling the result byte-identical. Every byte change invalidates the old exact-payload comparison.
+
+Editing or deleting an existing contribution is a new selected action against the exact current object. Show the interlocutor the current text and media, proposed replacement or deletion, acting identity, target and reason. Preserve the previous version privately; a changed byte is a new revision even when the correction is small. A changed live original requires renewed review rather than applying a stale edit. Ownership must match the acting Page or profile; moderation access to another person's contribution is not ownership.
+
+Distinguish recoverable removal from permanent deletion through the platform's normal recovery controls. Permanent deletion through a browser requires human confirmation at action time for that exact selected object and revision; broad account authority or an earlier general request is insufficient. Return the actual removed or restored state without rewriting the historical publication receipt. Absence from a limited view does not prove deletion.
+
+Keep relationship and feed decisions separate. The acting Page or profile is one dimension; Like, Follow, Unfollow, Hide, Snooze, Unfriend and Block are different actions. A Page following another Page does not establish a profile Like, and an Unfollow is not an Unlike or Unfriend. Resolve an ambiguous request to “hide this person” into the exact available feed control and its scope before acting. Do not infer related changes from one selected action.
+
+For moderation, bring enough actual context for the interlocutor to choose. Protect boundaries without inventing abuse or using deletion to conceal criticism. Record the selected reason and any interlocutor preference for additional human confirmation in the private deployment policy. Blocking remains excluded from live tests; an actual block requires its exact target, acting identity, supporting context and applicable human authorization. Friend requests always require separate specific human permission and a rationale for the actor and recipient. Return observed results with only the minimum abusive material needed as evidence.
 
 ## Participation without spam rituals
 

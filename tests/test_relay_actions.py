@@ -1,8 +1,10 @@
 import hashlib
+import copy
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from relay_actions import ActionStore, apply_action_request
 from relay_core import ConflictError, StateError, Store, ValidationError
@@ -20,6 +22,41 @@ def target(surface="message_thread", audience="private", parent=None):
 def candidate(text="", data=None, attachments=None):
     return {"candidate_id": "choice-a", "text": text, "attachments": attachments or [],
             "action_data": data or {}, "source_ref": "author-candidate-reference", "response_ref": "author-response-reference"}
+
+
+def management_plan(action, acting=None, *, surface=None, deletion_mode="recoverable"):
+    acting = acting or actor()
+    surfaces = {"unfollow_page": "page", "unfollow_profile": "profile", "hide_post": "post",
+                "hide_source": "page", "block": "profile"}
+    surface = surface or surfaces.get(action, "comment")
+    destination = target(surface, "public", "parent-post" if surface == "comment" else None)
+    destination["target_url"] = "https://social.example/objects/exact-target"
+    data = {"actor_id": acting["actor_id"], "actor_kind": acting["actor_kind"],
+            "target_id": destination["destination_id"], "target_url": destination["target_url"],
+            "reason": "Exact author-selected correction or boundary decision."}
+    if action in {"edit_own_content", "delete_own_content"}:
+        snapshot = {"owner_id": acting["actor_id"], "owner_kind": acting["actor_kind"],
+                    "revision_ref": "observed-original-r1", "text": "Original exact text.",
+                    "media_refs": ["original-media-one", "original-media-two"]}
+        destination["current_snapshot"] = copy.deepcopy(snapshot)
+        data["original_snapshot"] = copy.deepcopy(snapshot)
+        if action == "edit_own_content":
+            data["media_mode"] = "preserve"
+        else:
+            data["deletion_mode"] = deletion_mode
+            if deletion_mode == "recoverable":
+                data.update(recovery_description="Restore from observed trash for 30 days.", recovery_ref="observed-trash-help")
+    else:
+        states = {"unfollow_page": ("page_follow_state", "following"),
+                  "unfollow_profile": ("profile_follow_state", "following"),
+                  "hide_post": ("post_visibility", "visible"), "hide_source": ("source_visibility", "visible"),
+                  "block": ("block_state", "not_blocked")}
+        field, value = states[action]
+        destination.update({field: value, "state_revision_ref": "observed-state-r1"})
+        data["current_state_ref"] = "observed-state-r1"
+        if action == "block":
+            data.update(abuse_context_ref="scoped-private-abuse-context", block_scope=acting["actor_kind"] + "_block")
+    return destination, candidate("Replacement exact text." if action == "edit_own_content" else "", data)
 
 
 class RelayActionTests(unittest.TestCase):
@@ -62,6 +99,76 @@ class RelayActionTests(unittest.TestCase):
 
     def create_publication(self, action_id="a1", **kwargs):
         return self.create(action_id, "comment", destination=target("post", "public", "parent-post"), **kwargs)
+
+    def preflight(self, action_id="a1"):
+        action = self.store.inspect(action_id)
+        data, destination = action["candidate"]["action_data"], action["target"]
+        evidence = self.evidence(action_id) | {
+            "target_url": destination["target_url"], "control_available": True,
+            "control_label": "Observed exact selected UI control", "observed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if "current_snapshot" in destination:
+            evidence["current_snapshot"] = copy.deepcopy(destination["current_snapshot"])
+            if action["action"] == "delete_own_content":
+                evidence["deletion_mode"] = data["deletion_mode"]
+                if data["deletion_mode"] == "recoverable":
+                    evidence["recovery_description"] = data["recovery_description"]
+        else:
+            for key in ("page_follow_state", "profile_follow_state", "post_visibility", "source_visibility", "block_state", "state_revision_ref"):
+                if key in destination:
+                    evidence[key] = destination[key]
+            if action["action"] == "block":
+                evidence["block_scope"] = data["block_scope"]
+        return evidence
+
+    def permission(self, action_id="a1", operation_id="op1"):
+        action = self.store.inspect(action_id)
+        data = action["candidate"]["action_data"]
+        value = {"approved": True, "granted_by": "user", "actor_id": action["actor"]["actor_id"],
+                 "actor_kind": action["actor"]["actor_kind"], "destination_id": action["target"]["destination_id"],
+                 "target_url": action["target"]["target_url"], "action": action["action"],
+                 "action_sha256": action["action_sha256"], "operation_id": operation_id,
+                 "rationale": "Human confirms this exact operation after inspecting its current context.",
+                 "source_ref": "specific-action-time-human-confirmation", "granted_at": datetime.now(timezone.utc).isoformat()}
+        if action["action"] == "delete_own_content":
+            value.update(deletion_mode="permanent", original_snapshot_sha256=action["original_snapshot_sha256"])
+        else:
+            value.update(block_scope=data["block_scope"], abuse_context_ref=data["abuse_context_ref"])
+        return value
+
+    def management_result(self, action_id="a1"):
+        action = self.store.inspect(action_id)
+        data, destination = action["candidate"]["action_data"], action["target"]
+        evidence = self.evidence(action_id) | {"target_url": destination["target_url"], "action_taken": True,
+                                               "observed_at": datetime.now(timezone.utc).isoformat()}
+        if "current_snapshot" in destination:
+            evidence["original_snapshot_sha256"] = action["original_snapshot_sha256"]
+            if action["action"] == "edit_own_content":
+                media = list(data["original_snapshot"]["media_refs"]) if data["media_mode"] == "preserve" else [
+                    item["ref"] for item in action["candidate"].get("attachments", [])]
+                if data.get("platform_media"):
+                    media.append(data["platform_media"]["ref"])
+                evidence.update(content_state="edited", media_mode=data["media_mode"], result_snapshot={
+                    **data["original_snapshot"], "revision_ref": "observed-edited-r2",
+                    "text": action["candidate"]["text"], "media_refs": media})
+            else:
+                recoverable = data["deletion_mode"] == "recoverable"
+                evidence.update(deletion_mode=data["deletion_mode"], deletion_observed=True,
+                                deletion_state="trashed" if recoverable else "permanently_deleted",
+                                restore_available=recoverable, deletion_confirmation_ref="observed-deletion-confirmation")
+                if recoverable:
+                    evidence["recovery_description"] = data["recovery_description"]
+        else:
+            states = {"unfollow_page": ("page_follow_state", "not_following"),
+                      "unfollow_profile": ("profile_follow_state", "not_following"),
+                      "hide_post": ("post_visibility", "hidden"), "hide_source": ("source_visibility", "hidden"),
+                      "block": ("block_state", "blocked")}
+            field, value = states[action["action"]]
+            evidence.update({field: value, "prior_state_revision_ref": destination["state_revision_ref"],
+                             "result_state_ref": "observed-result-r2"})
+            if action["action"] == "block":
+                evidence["block_scope"] = data["block_scope"]
+        return evidence
 
     def core_case(self, core, case="core-case"):
         core.create_case(case, {"author_route": "example-thread", "actor_id": "example-page", "actor_kind": "page",
@@ -310,14 +417,16 @@ class RelayActionTests(unittest.TestCase):
             self.store.begin_action("a1", "op2")
 
     def test_block_can_be_described_but_cannot_dispatch_as_live_test(self):
-        self.create(action="block", selected=candidate(), destination=target("profile", "account"), scope="live_test")
+        destination, selected = management_plan("block")
+        self.create(action="block", selected=selected, destination=destination, scope="live_test")
         packet = self.store.action_packet("a1")
         self.assertEqual(packet["host_step"], "excluded_from_live_testing")
         self.assertFalse(packet["executes"])
         with self.assertRaisesRegex(StateError, "excluded from live testing"):
             self.store.begin_action("a1", "block-test")
         self.assertEqual(self.store.inspect("a1")["operations"], [])
-        self.create("page-block", "block", selected=candidate(), destination=target("page", "account"), scope="live_test")
+        destination, selected = management_plan("block", surface="page")
+        self.create("page-block", "block", selected=selected, destination=destination, scope="live_test")
         with self.assertRaisesRegex(StateError, "excluded from live testing"):
             self.store.begin_action("page-block", "page-block-test")
         self.create("other")
@@ -492,7 +601,6 @@ class RelayActionTests(unittest.TestCase):
                 self.store.record_outcome(operation_id, "submitted_pending", evidence)
         nonpublications = [("message", candidate("Exact message"), target(), {}),
                            ("react", candidate(data={"reaction": "LOVE"}), target("post", "public"), {}),
-                           ("block", candidate(), target("profile", "account"), {}),
                            ("friend_request", candidate(), target("profile", "recipient"),
                             {"friend_request_permission": {"approved": True, "granted_by": "user",
                              "actor_id": "example-profile", "destination_id": "example-target",
@@ -657,6 +765,263 @@ class RelayActionTests(unittest.TestCase):
                 self.assertTrue(self.store.begin_action(action_id, action_id + "-op")["newly_claimed"])
                 self.store.record_outcome(action_id + "-op", "failed_before_submit",
                                           {"source_ref": "synthetic-only", "observation": "No dispatch occurred.", "positive_no_submit": True})
+
+
+    def test_edit_binds_selected_owner_object_and_exact_original_revision(self):
+        destination, selected = management_plan("edit_own_content")
+        mutations = [
+            ("owner", lambda d, s: d["current_snapshot"].update(owner_id="someone-else")),
+            ("selected-owner", lambda d, s: (d["current_snapshot"].update(owner_id="someone-else"),
+                                              s["action_data"]["original_snapshot"].update(owner_id="someone-else"))),
+            ("text", lambda d, s: d["current_snapshot"].update(text="New external edit.")),
+            ("media-order", lambda d, s: d["current_snapshot"]["media_refs"].reverse()),
+            ("revision", lambda d, s: d["current_snapshot"].update(revision_ref="r2")),
+            ("target", lambda d, s: s["action_data"].update(target_id="another-target")),
+            ("actor", lambda d, s: s["action_data"].update(actor_kind="page")),
+            ("surface", lambda d, s: d.update(surface="profile")),
+            ("parent", lambda d, s: d.update(reply_parent_id=None)),
+        ]
+        for name, change in mutations:
+            d, s = copy.deepcopy(destination), copy.deepcopy(selected)
+            change(d, s)
+            with self.subTest(name=name), self.assertRaises(ValidationError):
+                self.create(action="edit_own_content", selected=s, destination=d)
+        saved = self.create(action="edit_own_content", selected=selected, destination=destination)
+        selected["action_data"]["original_snapshot"]["text"] = "Caller changed source."
+        destination["current_snapshot"]["media_refs"].clear()
+        self.assertEqual(self.store.inspect("a1")["original_snapshot_sha256"], saved["original_snapshot_sha256"])
+        self.assertEqual(self.store.inspect("a1")["target"]["current_snapshot"]["text"], "Original exact text.")
+
+    def test_edit_preflight_rejects_missing_stale_changed_or_wrong_actor_without_claim(self):
+        destination, selected = management_plan("edit_own_content")
+        self.create(action="edit_own_content", selected=selected, destination=destination)
+        evidence = self.preflight()
+        changed = copy.deepcopy(evidence)
+        changed["current_snapshot"]["text"] = "Changed after selection."
+        wrong = [None, {}, changed, evidence | {"actor_id": "other"}, evidence | {"action_sha256": "wrong"},
+                 evidence | {"control_available": False}, evidence | {"control_available": 1},
+                 evidence | {"observed_at": (datetime.now(timezone.utc) - timedelta(minutes=6)).isoformat()},
+                 evidence | {"observed_at": (datetime.now(timezone.utc) + timedelta(seconds=10)).isoformat()}]
+        for item in wrong:
+            with self.subTest(evidence=item), self.assertRaises(ValidationError):
+                self.store.begin_action("a1", "op1", preflight_evidence=item)
+        self.assertEqual(self.store.inspect("a1")["operations"], [])
+        claim = self.store.begin_action("a1", "op1", preflight_evidence=self.preflight())
+        self.assertTrue(claim["newly_claimed"])
+        self.assertEqual(claim["preflight_evidence"]["current_snapshot"], destination["current_snapshot"])
+
+    def test_verified_edit_preserves_original_and_requires_exact_new_revision(self):
+        destination, selected = management_plan("edit_own_content", actor("page"), surface="post")
+        saved = self.create(action="edit_own_content", selected=selected, acting=actor("page"), destination=destination)
+        self.store.begin_action("a1", "op1", preflight_evidence=self.preflight())
+        evidence = self.management_result()
+        for field, value in (("text", "Wrong replacement."), ("owner_id", "another-owner"),
+                             ("revision_ref", "observed-original-r1"), ("media_refs", [])):
+            wrong = copy.deepcopy(evidence)
+            wrong["result_snapshot"][field] = value
+            with self.subTest(field=field), self.assertRaises(ValidationError):
+                self.store.record_outcome("op1", "verified", wrong)
+        for wrong in (evidence | {"original_snapshot_sha256": "wrong"}, evidence | {"action_taken": False},
+                      evidence | {"observed_at": "2026-01-01T00:00:00Z"}):
+            with self.assertRaises(ValidationError):
+                self.store.record_outcome("op1", "verified", wrong)
+        self.store.record_outcome("op1", "verified", evidence)
+        restored = self.store.inspect("a1")
+        self.assertEqual(restored["candidate"], saved["candidate"])
+        self.assertEqual(restored["target"]["current_snapshot"]["text"], "Original exact text.")
+        self.assertEqual(restored["operations"][0]["observations"][-1]["evidence"]["result_snapshot"]["text"], selected["text"])
+
+    def test_edit_media_preserve_replace_remove_and_noop_are_explicit(self):
+        destination, selected = management_plan("edit_own_content")
+        wrong = copy.deepcopy(selected)
+        wrong["text"] = destination["current_snapshot"]["text"]
+        with self.assertRaisesRegex(ValidationError, "no-op"):
+            self.create(action="edit_own_content", selected=wrong, destination=destination)
+        wrong = copy.deepcopy(selected)
+        wrong["action_data"]["media_mode"] = "replace"
+        with self.assertRaises(ValidationError):
+            self.create(action="edit_own_content", selected=wrong, destination=destination)
+        selected["action_data"]["media_mode"] = "remove"
+        self.create(action="edit_own_content", selected=selected, destination=destination)
+        self.store.begin_action("a1", "op1", preflight_evidence=self.preflight())
+        self.store.record_outcome("op1", "verified", self.management_result())
+        image = Path(self.temp.name) / "replacement.png"
+        image.write_bytes(b"synthetic replacement media")
+        destination, selected = management_plan("edit_own_content")
+        destination["destination_id"] = "second-content"
+        selected["action_data"].update(target_id="second-content", media_mode="replace")
+        selected["attachments"] = [{"ref": str(image)}]
+        self.create("replace", "edit_own_content", selected=selected, destination=destination)
+        image.write_bytes(b"different bytes")
+        with self.assertRaisesRegex(StateError, "attachment bytes changed"):
+            self.store.begin_action("replace", "replace-op", preflight_evidence=self.preflight("replace"))
+
+    def test_permanent_delete_needs_specific_action_time_human_confirmation(self):
+        destination, selected = management_plan("delete_own_content", deletion_mode="permanent")
+        self.create(action="delete_own_content", selected=selected, destination=destination)
+        preflight, permission = self.preflight(), self.permission()
+        invalid = [None, {}, permission | {"approved": False}, permission | {"approved": 1},
+                   permission | {"granted_by": "interlocutor"}, permission | {"actor_id": "other"},
+                   permission | {"destination_id": "other"}, permission | {"operation_id": "other-op"},
+                   permission | {"original_snapshot_sha256": "other"}, permission | {"action_sha256": "other"},
+                   permission | {"deletion_mode": "recoverable"}, permission | {"rationale": ""},
+                   permission | {"granted_at": "2026-01-01T00:00:00Z"}]
+        for value in invalid:
+            with self.subTest(permission=value), self.assertRaises(ValidationError):
+                self.store.begin_action("a1", "op1", preflight_evidence=preflight, permanent_delete_confirmation=value)
+        self.assertEqual(self.store.inspect("a1")["operations"], [])
+        self.store.begin_action("a1", "op1", preflight_evidence=self.preflight(), permanent_delete_confirmation=permission)
+        evidence = self.management_result()
+        for wrong in (evidence | {"deletion_observed": False}, evidence | {"deletion_state": "missing_from_feed"},
+                      evidence | {"restore_available": True}, evidence | {"deletion_confirmation_ref": ""}):
+            with self.assertRaises(ValidationError):
+                self.store.record_outcome("op1", "verified", wrong)
+        self.store.record_outcome("op1", "verified", evidence)
+        self.assertFalse(self.store.begin_action("a1", "op1")["newly_claimed"])
+
+    def test_specific_pending_confirmation_survives_fresh_unchanged_inspection(self):
+        destination, selected = management_plan("delete_own_content", deletion_mode="permanent")
+        old = datetime.now(timezone.utc) - timedelta(hours=1)
+        with patch("relay_actions._now", return_value=old.isoformat()):
+            self.create(action="delete_own_content", selected=selected, destination=destination)
+        permission = self.permission() | {"granted_at": (old + timedelta(minutes=10)).isoformat()}
+        claim = self.store.begin_action("a1", "op1", preflight_evidence=self.preflight(), permanent_delete_confirmation=permission)
+        self.assertTrue(claim["newly_claimed"])
+        self.assertEqual(claim["permanent_delete_confirmation"], permission)
+
+    def test_recoverable_delete_requires_observed_recovery_and_no_live_delete_tests(self):
+        destination, selected = management_plan("delete_own_content")
+        wrong = copy.deepcopy(selected)
+        del wrong["action_data"]["recovery_ref"]
+        with self.assertRaises(ValidationError):
+            self.create(action="delete_own_content", selected=wrong, destination=destination)
+        self.create("test", "delete_own_content", selected=selected, destination=destination, scope="live_test")
+        self.assertEqual(self.store.action_packet("test")["host_step"], "excluded_from_live_testing")
+        with self.assertRaises(StateError):
+            self.store.begin_action("test", "test-op", preflight_evidence=self.preflight("test"))
+        self.create(action="delete_own_content", selected=selected, destination=destination)
+        self.store.begin_action("a1", "op1", preflight_evidence=self.preflight())
+        evidence = self.management_result()
+        with self.assertRaises(ValidationError):
+            self.store.record_outcome("op1", "verified", evidence | {"deletion_state": "permanently_deleted"})
+        self.store.record_outcome("op1", "verified", evidence)
+
+    def test_unfollow_and_hide_keep_surface_state_and_action_distinct(self):
+        for action in ("unfollow_page", "unfollow_profile", "hide_post", "hide_source"):
+            with self.subTest(action=action):
+                destination, selected = management_plan(action)
+                wrong = copy.deepcopy(selected)
+                wrong["action_data"]["like"] = False
+                with self.assertRaises(ValidationError):
+                    self.create(action, action, selected=wrong, destination=destination)
+                wrong = copy.deepcopy(destination)
+                wrong["surface"] = "comment"
+                with self.assertRaises(ValidationError):
+                    self.create(action, action, selected=selected, destination=wrong)
+                self.create(action, action, selected=selected, destination=destination)
+                self.store.begin_action(action, action + "-op", preflight_evidence=self.preflight(action))
+                evidence = self.management_result(action)
+                with self.assertRaises(ValidationError):
+                    self.store.record_outcome(action + "-op", "verified", evidence | {"publication_state": "published"})
+                for wrong in (evidence | {"action": "like_page"}, evidence | {"action_taken": False},
+                              evidence | {"result_state_ref": "observed-state-r1"},
+                              evidence | {"prior_state_revision_ref": "other"}):
+                    with self.assertRaises(ValidationError):
+                        self.store.record_outcome(action + "-op", "verified", wrong)
+                self.store.record_outcome(action + "-op", "verified", evidence)
+
+    def test_block_requires_abuse_context_actor_scope_specific_permission_and_blocked_result(self):
+        destination, selected = management_plan("block", actor("page"))
+        for replacement in ({"abuse_context_ref": ""}, {"block_scope": "page_ban"}, {"block_scope": "profile_block"}):
+            wrong = copy.deepcopy(selected)
+            wrong["action_data"].update(replacement)
+            with self.assertRaises(ValidationError):
+                self.create(action="block", selected=wrong, destination=destination, acting=actor("page"))
+        self.create(action="block", selected=selected, destination=destination, acting=actor("page"))
+        preflight, permission = self.preflight(), self.permission()
+        for wrong in (None, permission | {"granted_by": "interlocutor"},
+                      permission | {"abuse_context_ref": "other-context"}, permission | {"actor_kind": "profile"}):
+            with self.assertRaises(ValidationError):
+                self.store.begin_action("a1", "op1", preflight_evidence=preflight, block_permission=wrong)
+        self.store.begin_action("a1", "op1", preflight_evidence=preflight, block_permission=permission)
+        evidence = self.management_result()
+        for wrong in (evidence | {"block_state": "not_following"}, evidence | {"block_scope": "profile_block"}):
+            with self.assertRaises(ValidationError):
+                self.store.record_outcome("op1", "verified", wrong)
+        self.store.record_outcome("op1", "verified", evidence)
+
+    def test_new_management_outcomes_are_not_pending_or_unpublished_publications(self):
+        for action in ("edit_own_content", "delete_own_content", "unfollow_page", "unfollow_profile", "hide_post", "hide_source", "block"):
+            with self.subTest(action=action):
+                destination, selected = management_plan(action)
+                self.create(action, action, selected=selected, destination=destination)
+                kwargs = {"preflight_evidence": self.preflight(action)}
+                if action == "block":
+                    kwargs["block_permission"] = self.permission(action, action + "-op")
+                self.store.begin_action(action, action + "-op", **kwargs)
+                for outcome in ("submitted_pending", "not_published"):
+                    with self.assertRaises(ValidationError):
+                        self.store.record_outcome(action + "-op", outcome, self.management_result(action))
+                self.store.record_outcome(action + "-op", "failed_before_submit", {
+                    "source_ref": "synthetic-only", "observation": "No external action was taken.", "positive_no_submit": True})
+
+    def test_completed_mutation_cannot_be_cloned_with_new_local_ids_or_provenance(self):
+        destination, selected = management_plan("edit_own_content")
+        self.create(action="edit_own_content", selected=selected, destination=destination)
+        self.store.begin_action("a1", "op1", preflight_evidence=self.preflight())
+        self.store.record_outcome("op1", "verified", self.management_result())
+        clone = copy.deepcopy(selected)
+        clone.update(candidate_id="new-id", source_ref="new-source", response_ref="new-response")
+        self.create("clone", "edit_own_content", selected=clone, destination=destination)
+        with self.assertRaisesRegex(StateError, "consumed snapshot"):
+            self.store.begin_action("clone", "clone-op", preflight_evidence=self.preflight("clone"))
+        destination, selected = management_plan("unfollow_page")
+        self.create("follow", "unfollow_page", selected=selected, destination=destination)
+        self.store.begin_action("follow", "follow-op", preflight_evidence=self.preflight("follow"))
+        self.store.record_outcome("follow-op", "verified", self.management_result("follow"))
+        selected.update(candidate_id="different", source_ref="different", response_ref="different")
+        self.create("follow-clone", "unfollow_page", selected=selected, destination=destination)
+        with self.assertRaisesRegex(StateError, "consumed snapshot"):
+            self.store.begin_action("follow-clone", "follow-clone-op", preflight_evidence=self.preflight("follow-clone"))
+
+    def test_interrupted_mutation_preserves_claim_and_confirmation_without_blind_retry(self):
+        destination, selected = management_plan("delete_own_content", deletion_mode="permanent")
+        self.create(action="delete_own_content", selected=selected, destination=destination)
+        self.store.begin_action("a1", "op1", preflight_evidence=self.preflight(), permanent_delete_confirmation=self.permission())
+        self.store.close()
+        self.store = ActionStore(self.db)
+        self.assertEqual(self.store.recover(), ["op1"])
+        with self.assertRaises(StateError):
+            self.store.begin_action("a1", "another", preflight_evidence=self.preflight(), permanent_delete_confirmation=self.permission())
+        saved = self.store.inspect("a1")["operations"][0]
+        self.assertEqual(saved["permanent_delete_confirmation"]["operation_id"], "op1")
+        self.store.reconcile("op1", "verified", self.management_result(), "actual-new-observation")
+        self.assertEqual(len(self.store.inspect("a1")["operations"]), 1)
+
+
+    def test_unexpected_pending_edit_preserves_known_submission_without_retry_or_false_success(self):
+        destination, selected = management_plan("edit_own_content")
+        action = self.create(action="edit_own_content", selected=selected, destination=destination)
+        self.store.begin_action("a1", "op1", preflight_evidence=self.preflight())
+        evidence = self.evidence() | {"target_url": destination["target_url"],
+                    "original_snapshot_sha256": action["original_snapshot_sha256"],
+                    "edit_revision_state": "pending", "submission_observed": True,
+                    "pending_revision_ref": "actual-visible-pending-edit", "observed_at": datetime.now(timezone.utc).isoformat()}
+        for outcome in ("verified", "failed_before_submit", "submitted_pending"):
+            with self.subTest(outcome=outcome), self.assertRaises(ValidationError):
+                self.store.record_outcome("op1", outcome, evidence)
+        self.store.record_outcome("op1", "uncertain", evidence)
+        self.create("unrelated")
+        with self.assertRaises(StateError):
+            self.store.begin_action("unrelated", "unrelated-op")
+        with self.assertRaises(StateError):
+            self.store.reconcile("op1", "failed_before_submit", {
+                "source_ref": "wrong", "observation": "Cannot erase observed submission.", "positive_no_submit": True}, "wrong")
+        self.store.reconcile("op1", "verified", self.management_result(), "actual-later-revised-content")
+        saved = self.store.inspect("a1")
+        self.assertEqual(saved["operations"][0]["observations"][0]["evidence"]["edit_revision_state"], "pending")
+        self.assertEqual(saved["target"]["current_snapshot"]["text"], "Original exact text.")
+        self.assertEqual(saved["execution_state"], "verified")
 
 
 if __name__ == "__main__":

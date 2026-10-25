@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -22,11 +23,13 @@ from relay_core import (
 
 
 ACTIONS = {"message", "react", "share", "share_with_commentary", "post", "original_post",
-           "comment", "reply", "friend_request", "block", "like_page", "follow_page"}
+           "comment", "reply", "friend_request", "block", "like_page", "follow_page",
+           "edit_own_content", "delete_own_content", "unfollow_page", "unfollow_profile",
+           "hide_post", "hide_source"}
 ACTION_METHODS = {"create_action", "begin_action", "record_outcome", "reconcile",
                   "inspect", "action_packet", "recover"}
 _SURFACES = {"feed_item", "post", "comment", "profile_timeline", "page_timeline", "message_thread", "profile", "page"}
-_CONTENT_ACTIONS = {"message", "post", "original_post", "comment", "reply", "share_with_commentary"}
+_CONTENT_ACTIONS = {"message", "post", "original_post", "comment", "reply", "share_with_commentary", "edit_own_content"}
 _PUBLICATION_ACTIONS = {"post", "original_post", "comment", "reply", "share", "share_with_commentary"}
 _OUTCOMES = {"verified", "uncertain", "failed_before_submit", "submitted_pending", "not_published"}
 _PACKET_SCHEMA = "interlocutors-relay/action-packet/v1"
@@ -34,6 +37,17 @@ _PAGE_RELATIONSHIP_STATES = {
     "like_page": ("page_like_state", "not_liked", "liked", "already_liked"),
     "follow_page": ("page_follow_state", "not_following", "following", "already_following"),
 }
+_OWN_CONTENT_ACTIONS = {"edit_own_content", "delete_own_content"}
+_MODERATION_STATES = {
+    "unfollow_page": ("page_follow_state", "following", "not_following", {"page"}),
+    "unfollow_profile": ("profile_follow_state", "following", "not_following", {"profile"}),
+    "hide_post": ("post_visibility", "visible", "hidden", {"post", "feed_item"}),
+    "hide_source": ("source_visibility", "visible", "hidden", {"profile", "page"}),
+    "block": ("block_state", "not_blocked", "blocked", {"profile", "page"}),
+}
+_GUARDED_ACTIONS = _OWN_CONTENT_ACTIONS | set(_MODERATION_STATES)
+_EXCLUDED_LIVE_TESTS = {"block", "delete_own_content"}
+_PREFLIGHT_MAX_AGE_SECONDS = 300
 
 
 def _reference(value: Any, label: str) -> Any:
@@ -47,6 +61,129 @@ def _object(value: Any, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValidationError(f"{label} must be an object")
     return json.loads(_json(value, label))
+
+
+def _https_url(value: Any, label: str) -> str:
+    try:
+        parsed = urlsplit(value) if isinstance(value, str) else None
+        valid = (parsed is not None and parsed.scheme == "https" and parsed.hostname
+                 and parsed.path not in {"", "/"} and not parsed.username and not parsed.password
+                 and not any(char.isspace() for char in value))
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValidationError(f"{label} requires an absolute HTTPS target URL")
+    return value
+
+
+def _digest(value: Any) -> str:
+    return hashlib.sha256(_json(value, "snapshot").encode("utf-8")).hexdigest()
+
+
+def _snapshot(value: Any, label: str) -> dict[str, Any]:
+    value = _object(value, label)
+    fields = {"owner_id", "owner_kind", "revision_ref", "text", "media_refs"}
+    if set(value) != fields:
+        raise ValidationError(f"{label} requires owner, revision, exact text and ordered media references")
+    _id(value["owner_id"], f"{label}.owner_id")
+    if value["owner_kind"] not in {"page", "profile"}:
+        raise ValidationError(f"{label}.owner_kind must be page or profile")
+    _reference(value["revision_ref"], f"{label}.revision_ref")
+    if not isinstance(value["text"], str) or not isinstance(value["media_refs"], list):
+        raise ValidationError(f"{label} requires exact text and ordered media_refs")
+    for ref in value["media_refs"]:
+        _reference(ref, f"{label}.media_refs")
+    return value
+
+
+def _replacement_media(candidate: dict[str, Any]) -> list[Any]:
+    data = candidate["action_data"]
+    if data["media_mode"] == "preserve":
+        return data["original_snapshot"]["media_refs"]
+    refs = [item["ref"] for item in candidate.get("attachments", [])]
+    if data.get("platform_media") is not None:
+        refs.append(data["platform_media"]["ref"])
+    return refs
+
+
+def _validate_guarded_plan(action: str, actor: dict[str, Any], target: dict[str, Any],
+                           candidate: dict[str, Any]) -> None:
+    """Validate an observed, explicitly selected transition, not a UI capability."""
+    if action not in _GUARDED_ACTIONS:
+        return
+    data = candidate.get("action_data", {})
+    selected = {"actor_id": actor["actor_id"], "actor_kind": actor["actor_kind"],
+                "target_id": target["destination_id"], "target_url": target.get("target_url")}
+    _https_url(selected["target_url"], "target.target_url")
+    for key, value in selected.items():
+        if data.get(key) != value:
+            raise ValidationError(f"selected action_data.{key} must match the exact actor and target")
+    _id(data.get("reason"), "action_data.reason")
+    allowed = set(selected) | {"reason"}
+    if action in _OWN_CONTENT_ACTIONS:
+        if target["surface"] not in {"post", "comment"}:
+            raise ValidationError("own-content mutation requires an exact post or comment")
+        if target["surface"] == "comment":
+            _id(target.get("reply_parent_id"), "target.reply_parent_id")
+        elif target.get("reply_parent_id") is not None:
+            raise ValidationError("own-post mutation cannot name a reply parent")
+        original = _snapshot(data.get("original_snapshot"), "action_data.original_snapshot")
+        if original != _snapshot(target.get("current_snapshot"), "target.current_snapshot"):
+            raise ValidationError("selected original snapshot differs from observed current content")
+        if (original["owner_id"], original["owner_kind"]) != (actor["actor_id"], actor["actor_kind"]):
+            raise ValidationError("own-content mutation requires the acting identity to own the content")
+        allowed.add("original_snapshot")
+        if action == "edit_own_content":
+            allowed |= {"media_mode", "platform_media"}
+            mode = data.get("media_mode")
+            if mode not in {"preserve", "replace", "remove"}:
+                raise ValidationError("edit requires explicit preserve, replace or remove media_mode")
+            new_media = candidate.get("attachments", []) or data.get("platform_media")
+            if (mode == "replace" and not new_media) or (mode != "replace" and new_media):
+                raise ValidationError("only replace media_mode may contain selected replacement media")
+            after_media = _replacement_media(candidate)
+            if candidate.get("text", "") == original["text"] and after_media == original["media_refs"]:
+                raise ValidationError("unchanged content is a no-op, not an edit operation")
+            if not candidate.get("text", "").strip() and not after_media:
+                raise ValidationError("empty content requires a separately selected deletion")
+        else:
+            allowed |= {"deletion_mode", "recovery_description", "recovery_ref"}
+            if data.get("deletion_mode") not in {"recoverable", "permanent"}:
+                raise ValidationError("delete requires explicit recoverable or permanent deletion_mode")
+            if data["deletion_mode"] == "recoverable":
+                _id(data.get("recovery_description"), "action_data.recovery_description")
+                _reference(data.get("recovery_ref"), "action_data.recovery_ref")
+            elif "recovery_description" in data or "recovery_ref" in data:
+                raise ValidationError("permanent deletion cannot claim a recovery route")
+    else:
+        field, before, _, surfaces = _MODERATION_STATES[action]
+        if target["surface"] not in surfaces or target.get("reply_parent_id") is not None:
+            raise ValidationError(f"{action} requires its exact supported target surface")
+        if target.get(field) != before:
+            raise ValidationError(f"{action} requires observed {before}; desired state is a no-op")
+        _reference(target.get("state_revision_ref"), "target.state_revision_ref")
+        if data.get("current_state_ref") != target["state_revision_ref"]:
+            raise ValidationError("selected current_state_ref differs from observed state revision")
+        allowed.add("current_state_ref")
+        if action == "block":
+            _reference(data.get("abuse_context_ref"), "action_data.abuse_context_ref")
+            if data.get("block_scope") != actor["actor_kind"] + "_block":
+                raise ValidationError("block_scope must identify the acting profile or Page block, not a Page ban")
+            allowed |= {"abuse_context_ref", "block_scope"}
+    if set(data) - allowed:
+        raise ValidationError("selected mutation includes unrelated or unsupported action data")
+    if action != "edit_own_content" and (candidate.get("text", "") or candidate.get("attachments")):
+        raise ValidationError("moderation/deletion is separate from publishing text or media")
+
+
+def _recent_observation(value: Any, label: str, created_at: str) -> datetime:
+    _zoned_timestamp(value, label)
+    observed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    now = datetime.now(timezone.utc)
+    if observed < created or observed > now or (now - observed).total_seconds() > _PREFLIGHT_MAX_AGE_SECONDS:
+        raise ValidationError(f"{label} must be a fresh observation after action creation (maximum five minutes)")
+    return observed
 
 
 def _guard_id(operation_id: str) -> str:
@@ -193,6 +330,95 @@ class ActionStore(Store):
                     return operation["operation_id"]
         return None
 
+    def _mutation_duplicate(self, db, action):
+        """Completed choices and consumed state snapshots cannot be cloned into retries."""
+        if action["action"] not in _GUARDED_ACTIONS:
+            return None
+        for row in db.execute("SELECT document FROM relay_actions WHERE action_id<>?", (action["action_id"],)):
+            other = json.loads(row[0])
+            if other["action"] not in _GUARDED_ACTIONS:
+                continue
+            if any(other["actor"].get(key) != action["actor"].get(key) for key in ("actor_id", "actor_kind")):
+                continue
+            if other["target"]["destination_id"] != action["target"]["destination_id"]:
+                continue
+            own = action["action"] in _OWN_CONTENT_ACTIONS and other["action"] in _OWN_CONTENT_ACTIONS
+            same_state = (own and other["target"].get("current_snapshot") == action["target"]["current_snapshot"])
+            if not own and other["action"] == action["action"]:
+                same_state = other["target"].get("state_revision_ref") == action["target"].get("state_revision_ref")
+            same_choice = (other["action"] == action["action"]
+                           and _candidate_provenance(other) == _candidate_provenance(action))
+            if same_state or same_choice:
+                for operation in self._operations(db, other["action_id"]):
+                    if operation["state"] == "verified":
+                        return operation["operation_id"]
+        return None
+
+    @staticmethod
+    def _bound_evidence(action):
+        expected = {"actor_id": action["actor"]["actor_id"], "actor_kind": action["actor"]["actor_kind"],
+                    "destination_id": action["target"]["destination_id"], "surface": action["target"]["surface"],
+                    "audience": action["target"]["audience"], "action": action["action"],
+                    "action_sha256": action["action_sha256"]}
+        if "reply_parent_id" in action["target"]:
+            expected["reply_parent_id"] = action["target"]["reply_parent_id"]
+        return expected
+
+    @staticmethod
+    def _matches(evidence, expected, label):
+        for field, value in expected.items():
+            if (field not in evidence or evidence[field] != value
+                    or (isinstance(value, bool) and evidence[field] is not value)):
+                raise ValidationError(f"{label}.{field} does not match selected action")
+
+    @classmethod
+    def _preflight(cls, action, evidence):
+        evidence = _object(evidence, "preflight_evidence")
+        _id(evidence.get("observation"), "preflight_evidence.observation")
+        _id(evidence.get("control_label"), "preflight_evidence.control_label")
+        _reference(evidence.get("source_ref"), "preflight_evidence.source_ref")
+        _recent_observation(evidence.get("observed_at"), "preflight_evidence.observed_at", action["created_at"])
+        expected = cls._bound_evidence(action) | {"target_url": action["target"]["target_url"],
+                                                  "control_available": True}
+        data = action["candidate"]["action_data"]
+        if action["action"] in _OWN_CONTENT_ACTIONS:
+            expected["current_snapshot"] = action["target"]["current_snapshot"]
+            if action["action"] == "delete_own_content":
+                expected["deletion_mode"] = data["deletion_mode"]
+                if data["deletion_mode"] == "recoverable":
+                    expected["recovery_description"] = data["recovery_description"]
+        else:
+            field, before, _, _ = _MODERATION_STATES[action["action"]]
+            expected[field] = before
+            expected["state_revision_ref"] = action["target"]["state_revision_ref"]
+            if action["action"] == "block":
+                expected["block_scope"] = data["block_scope"]
+        cls._matches(evidence, expected, "preflight_evidence")
+        return evidence
+
+    @classmethod
+    def _confirmation(cls, action, value, label, preflight, operation_id):
+        """Record a freshly checked human decision; the host authenticates its source."""
+        value = _object(value, label)
+        expected = {"approved": True, "granted_by": "user", "actor_id": action["actor"]["actor_id"],
+                    "actor_kind": action["actor"]["actor_kind"], "destination_id": action["target"]["destination_id"],
+                    "target_url": action["target"]["target_url"], "action_sha256": action["action_sha256"],
+                    "action": action["action"], "operation_id": operation_id}
+        data = action["candidate"]["action_data"]
+        if action["action"] == "delete_own_content":
+            expected.update(deletion_mode="permanent", original_snapshot_sha256=_digest(data["original_snapshot"]))
+        else:
+            expected.update(block_scope=data["block_scope"], abuse_context_ref=data["abuse_context_ref"])
+        cls._matches(value, expected, label)
+        _id(value.get("rationale"), label + ".rationale")
+        _reference(value.get("source_ref"), label + ".source_ref")
+        _zoned_timestamp(value.get("granted_at"), label + ".granted_at")
+        granted = datetime.fromisoformat(value["granted_at"].replace("Z", "+00:00"))
+        created = datetime.fromisoformat(action["created_at"].replace("Z", "+00:00"))
+        if granted < created or granted > datetime.now(timezone.utc):
+            raise ValidationError(f"{label} must be an actual human confirmation after this exact action was prepared")
+        return value
+
     def create_action(self, action_id: str, action: str, actor: dict[str, Any],
                       target: dict[str, Any], candidate: dict[str, Any], selection_ref: Any,
                       authority: dict[str, Any], scope: str = "live",
@@ -286,7 +512,8 @@ class ActionStore(Store):
                 raise ValidationError(f"{action} is distinct from content, reactions and other relationship actions")
         if action in {"share", "share_with_commentary"}:
             _reference(action_data.get("source_ref"), "action_data.source_ref")
-        if action in _CONTENT_ACTIONS and not (candidate.get("text", "").strip() or attachments or platform_media):
+        _validate_guarded_plan(action, actor, target, candidate)
+        if action in _CONTENT_ACTIONS - {"edit_own_content"} and not (candidate.get("text", "").strip() or attachments or platform_media):
             raise ValidationError("content action requires actual text, attachments or selected platform media")
         authority = _object(authority, "authority")
         _reference(authority.get("source_ref"), "authority.source_ref")
@@ -307,6 +534,8 @@ class ActionStore(Store):
                   "selection_ref": selection_ref, "authority": authority, "scope": scope,
                   "friend_request_permission": permission, "account_policy": policy,
                   "local_attachments": _local_attachments(candidate)}
+        if action in _OWN_CONTENT_ACTIONS:
+            intent["original_snapshot_sha256"] = _digest(action_data["original_snapshot"])
         action_sha256 = hashlib.sha256(_json(intent, "selected action").encode("utf-8")).hexdigest()
         document = {"action_id": action_id, "created_at": _now(), "action_sha256": action_sha256, **intent}
         with self._tx() as db:
@@ -331,13 +560,14 @@ class ActionStore(Store):
                 "failed_before_submit": "review_before_new_attempt",
                 "submitted_pending": "observe_pending_publication",
                 "not_published": "return_not_published_result"}[state]
-        if action["action"] == "block" and action["scope"] == "live_test":
+        if action["action"] in _EXCLUDED_LIVE_TESTS and action["scope"] == "live_test":
             step = "excluded_from_live_testing"
         return {"schema": _PACKET_SCHEMA, "local_only": True, "executes": False,
                 "content_state": "selected_action", "action_authority": action["authority"],
                 "execution_state": state, "host_step": step, "record": action}
 
-    def begin_action(self, action_id: str, operation_id: str) -> dict[str, Any]:
+    def begin_action(self, action_id: str, operation_id: str, *, preflight_evidence: Any = None,
+                     permanent_delete_confirmation: Any = None, block_permission: Any = None) -> dict[str, Any]:
         """Commit a single shared-guard claim before the host operates the UI."""
         _id(operation_id, "operation_id")
         with self._tx() as db:
@@ -349,14 +579,31 @@ class ActionStore(Store):
                     raise ConflictError("operation_id belongs to a different action")
                 return {**operation, "newly_claimed": False, "executes": False,
                         "host_step": "inspect_existing_operation"}
-            if action["action"] == "block" and action["scope"] == "live_test":
-                raise StateError("blocking is excluded from live testing")
+            if action["action"] in _EXCLUDED_LIVE_TESTS and action["scope"] == "live_test":
+                raise StateError("blocking and deletion are excluded from live testing")
             operations = self._operations(db, action_id)
             if operations and operations[-1]["state"] != "failed_before_submit":
                 raise StateError("action already submitted or unresolved; reconcile instead of repeating")
             duplicate = self._pending_duplicate(db, action)
             if duplicate is not None:
                 raise StateError(f"selected publication duplicates submitted operation {duplicate}; do not resubmit")
+            duplicate = self._mutation_duplicate(db, action)
+            if duplicate is not None:
+                raise StateError(f"selected mutation repeats completed choice or consumed snapshot {duplicate}")
+            preflight, delete_confirmation, blocking = None, None, None
+            if action["action"] in _GUARDED_ACTIONS:
+                _validate_guarded_plan(action["action"], action["actor"], action["target"], action["candidate"])
+                preflight = self._preflight(action, preflight_evidence)
+            elif preflight_evidence is not None:
+                raise ValidationError("preflight_evidence applies only to explicit content-management/moderation actions")
+            if action["action"] == "delete_own_content" and action["candidate"]["action_data"]["deletion_mode"] == "permanent":
+                delete_confirmation = self._confirmation(action, permanent_delete_confirmation, "permanent_delete_confirmation", preflight, operation_id)
+            elif permanent_delete_confirmation is not None:
+                raise ValidationError("permanent_delete_confirmation applies only to permanent deletion")
+            if action["action"] == "block":
+                blocking = self._confirmation(action, block_permission, "block_permission", preflight, operation_id)
+            elif block_permission is not None:
+                raise ValidationError("block_permission applies only to blocking")
             if _local_attachments(action["candidate"]) != action.get("local_attachments", []):
                 raise StateError("selected local attachment bytes changed; inspect and obtain a new selection")
             guard = db.execute("SELECT * FROM delivery_guard WHERE singleton=1").fetchone()
@@ -365,6 +612,12 @@ class ActionStore(Store):
             operation = {"operation_id": operation_id, "action_id": action_id,
                          "action_sha256": action["action_sha256"], "state": "in_flight",
                          "started_at": _now(), "observations": []}
+            if preflight is not None:
+                operation["preflight_evidence"] = preflight
+            if delete_confirmation is not None:
+                operation["permanent_delete_confirmation"] = delete_confirmation
+            if blocking is not None:
+                operation["block_permission"] = blocking
             db.execute("INSERT INTO relay_action_operations(operation_id,action_id,document) VALUES (?,?,?)",
                        (operation_id, action_id, _json(operation, "action operation")))
             db.execute("INSERT INTO delivery_guard VALUES (1,?,'in_flight')", (_guard_id(operation_id),))
@@ -376,8 +629,19 @@ class ActionStore(Store):
         if outcome not in _OUTCOMES:
             raise ValidationError("unsupported action outcome")
         evidence = _object(evidence, "evidence")
+        if action["action"] in _GUARDED_ACTIONS and "publication_state" in evidence:
+            raise ValidationError("content management/moderation results cannot use publication_state")
         _id(evidence.get("observation"), "evidence.observation")
         _reference(evidence.get("source_ref"), "evidence.source_ref")
+        if action["action"] == "edit_own_content" and evidence.get("edit_revision_state") == "pending":
+            if outcome != "uncertain" or evidence.get("submission_observed") is not True or evidence.get("positive_no_submit") is True:
+                raise ValidationError("an observed pending edit has known submission and an unresolved revised-state outcome")
+            ActionStore._matches(evidence, ActionStore._bound_evidence(action) | {
+                "target_url": action["target"]["target_url"],
+                "original_snapshot_sha256": action["original_snapshot_sha256"],
+            }, "pending edit evidence")
+            _reference(evidence.get("pending_revision_ref"), "evidence.pending_revision_ref")
+            _zoned_timestamp(evidence.get("observed_at"), "evidence.observed_at")
         if outcome == "failed_before_submit" and evidence.get("positive_no_submit") is not True:
             raise ValidationError("failed_before_submit requires positive_no_submit true")
         if outcome in {"submitted_pending", "not_published"}:
@@ -396,12 +660,7 @@ class ActionStore(Store):
             if evidence.get("submission_observed") is False or evidence.get("positive_no_submit") is True:
                 raise ValidationError("verified evidence cannot deny submission")
         if outcome in {"verified", "submitted_pending", "not_published"}:
-            expected = {"actor_id": action["actor"]["actor_id"], "actor_kind": action["actor"]["actor_kind"],
-                        "destination_id": action["target"]["destination_id"], "surface": action["target"]["surface"],
-                        "audience": action["target"]["audience"], "action": action["action"],
-                        "action_sha256": action["action_sha256"]}
-            if "reply_parent_id" in action["target"]:
-                expected["reply_parent_id"] = action["target"]["reply_parent_id"]
+            expected = ActionStore._bound_evidence(action)
             if action["action"] in _CONTENT_ACTIONS:
                 expected["text"] = action["candidate"].get("text", "")
             attachments = action["candidate"].get("attachments", [])
@@ -425,14 +684,46 @@ class ActionStore(Store):
                 field, _, after, _ = _PAGE_RELATIONSHIP_STATES[action["action"]]
                 expected.update(page_url=action["target"]["page_url"], action_taken=True)
                 expected[field] = after
+            if action["action"] in _GUARDED_ACTIONS:
+                _validate_guarded_plan(action["action"], action["actor"], action["target"], action["candidate"])
+                expected.update(target_url=action["target"]["target_url"], action_taken=True)
+                if action["action"] in _OWN_CONTENT_ACTIONS:
+                    original = action_data["original_snapshot"]
+                    expected["original_snapshot_sha256"] = _digest(original)
+                    if action["action"] == "edit_own_content":
+                        expected["content_state"] = "edited"
+                        expected["media_mode"] = action_data["media_mode"]
+                        result_snapshot = _snapshot(evidence.get("result_snapshot"), "evidence.result_snapshot")
+                        if result_snapshot["revision_ref"] == original["revision_ref"]:
+                            raise ValidationError("edited content needs a newly observed revision reference")
+                        ActionStore._matches(result_snapshot, {
+                            "owner_id": original["owner_id"], "owner_kind": original["owner_kind"],
+                            "text": action["candidate"].get("text", ""),
+                            "media_refs": _replacement_media(action["candidate"]),
+                        }, "evidence.result_snapshot")
+                    else:
+                        recoverable = action_data["deletion_mode"] == "recoverable"
+                        expected.update(deletion_mode=action_data["deletion_mode"], deletion_observed=True,
+                                        deletion_state="trashed" if recoverable else "permanently_deleted",
+                                        restore_available=recoverable)
+                        _reference(evidence.get("deletion_confirmation_ref"), "evidence.deletion_confirmation_ref")
+                        if recoverable:
+                            expected["recovery_description"] = action_data["recovery_description"]
+                else:
+                    field, _, after, _ = _MODERATION_STATES[action["action"]]
+                    expected[field] = after
+                    expected["prior_state_revision_ref"] = action["target"]["state_revision_ref"]
+                    _reference(evidence.get("result_state_ref"), "evidence.result_state_ref")
+                    if evidence["result_state_ref"] == action["target"]["state_revision_ref"]:
+                        raise ValidationError("verified mutation needs a newly observed result state reference")
+                    if action["action"] == "block":
+                        expected["block_scope"] = action_data["block_scope"]
             if action["action"] in {"share", "share_with_commentary"}:
                 expected["shared_source_ref"] = action_data["source_ref"]
             if action_data.get("platform_media") is not None:
                 expected["platform_media_ref"] = action_data["platform_media"]["ref"]
                 expected["platform_media_kind"] = action_data["platform_media"]["kind"]
-            for field, value in expected.items():
-                if field not in evidence or evidence[field] != value:
-                    raise ValidationError(f"{outcome} evidence.{field} does not match selected action")
+            ActionStore._matches(evidence, expected, f"{outcome} evidence")
             _zoned_timestamp(evidence.get("observed_at"), "evidence.observed_at")
         return evidence
 
@@ -446,7 +737,17 @@ class ActionStore(Store):
             if operation["state"] == "submitted_pending" and outcome not in {"submitted_pending", "verified", "not_published"}:
                 raise StateError("a known submitted publication may only remain pending, publish, or be observed not published")
             action = self._action(db, operation["action_id"])
+            pending_edit_observed = any(item["evidence"].get("edit_revision_state") == "pending"
+                                        and item["evidence"].get("submission_observed") is True
+                                        for item in operation["observations"])
+            if pending_edit_observed and outcome == "failed_before_submit":
+                raise StateError("a positively observed submitted edit cannot become failed_before_submit")
             evidence = self._evidence(action, outcome, evidence)
+            if action["action"] in _GUARDED_ACTIONS and (outcome == "verified" or evidence.get("edit_revision_state") == "pending"):
+                observed = datetime.fromisoformat(evidence["observed_at"].replace("Z", "+00:00"))
+                started = datetime.fromisoformat(operation["started_at"].replace("Z", "+00:00"))
+                if observed < started or observed > datetime.now(timezone.utc):
+                    raise ValidationError("verified mutation evidence must be observed after the claimed operation")
             if operation["state"] == "submitted_pending" and outcome == "verified" and (
                     evidence.get("publication_state") != "published" or evidence.get("submission_observed") is not True):
                 raise ValidationError("pending publication requires explicit observed publication before verification")

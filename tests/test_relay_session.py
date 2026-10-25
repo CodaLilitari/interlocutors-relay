@@ -364,7 +364,9 @@ class RelaySessionTests(unittest.TestCase):
             ("REACT", "react", "", {"reaction": "LOVE"}),
             ("SHARE", "share", "", {"source_ref": "selected-source-post"}),
             ("SHARE_WITH_COMMENTARY", "share_with_commentary", "Exact commentary", {"source_ref": "selected-source-post"}),
-            ("BLOCK", "block", "", {"rationale": "Synthetic offline test only"}),
+            ("BLOCK", "block", "", {"reason": "Synthetic offline test only", "actor_id": "example-actor",
+             "actor_kind": "page", "target_id": "example-target", "target_url": "https://social.example/profile/target",
+             "current_state_ref": "actual-unblocked-state", "abuse_context_ref": "private-actual-context", "block_scope": "page_block"}),
             ("FRIEND_REQUEST", "friend_request", "", {"rationale": "Specific synthetic recipient"}),
             ("LIKE_PAGE", "like_page", "", {"page_url": "https://social.example/pages/science"}),
             ("FOLLOW_PAGE", "follow_page", "", {"page_url": "https://social.example/pages/science"}),
@@ -386,6 +388,8 @@ class RelaySessionTests(unittest.TestCase):
                     target.update(page_url=action_data["page_url"], page_like_state="not_liked")
                 if action == "follow_page":
                     target.update(page_url=action_data["page_url"], page_follow_state="not_following")
+                if action == "block":
+                    target.update(target_url=action_data["target_url"], block_state="not_blocked", state_revision_ref=action_data["current_state_ref"])
                 permission = {"approved": True, "granted_by": "user", "actor_id": actor["actor_id"],
                               "destination_id": target["destination_id"], "rationale": "A specific synthetic contact",
                               "source_ref": "specific-user-permission"} if action == "friend_request" else None
@@ -808,6 +812,78 @@ class RelaySessionTests(unittest.TestCase):
         self.assertEqual(revision["source_ref"]["selection_ref"], "original-selection")
         with self.assertRaises(NotFoundError):
             self.store.export_to_core_request("private", "case", "r1", binding, turn_id="missing")
+
+
+    def test_management_choices_preserve_typed_private_snapshots_and_exact_selection(self):
+        self.send()
+        names = ("edit_own_content", "delete_own_content", "unfollow_page", "unfollow_profile", "hide_post", "hide_source", "block")
+        choices = [{"candidate_id": name, "disposition": name.upper(), "source_ref": "actual-choice-" + name,
+                    "text": "Replacement exact text." if name == "edit_own_content" else "",
+                    "action_data": {"reason": "Exact reason.", "target_id": "exact-object", "actor_id": "selected-actor",
+                                    "original_snapshot": {"text": "Prior private version.", "media_refs": ["first", "second"]}}}
+                   for name in names]
+        self.answer("MULTIPLE", choices)
+        for name, original in zip(names, choices):
+            with self.subTest(action=name):
+                self.store.select_candidate("private", "t1", name, "selected-" + name)
+                packet = self.store.export_to_action_request("private", name, name, {}, {}, {"source_ref": "human-scope"})
+                request = packet["requests"][0]["arguments"]
+                self.assertEqual(request["candidate"]["action_data"], original["action_data"])
+                self.assertEqual(request["selection_ref"]["candidate_source_ref"], original["source_ref"])
+                self.assertFalse(packet["executes"])
+                self.assertEqual(packet["execution_state"], "not_executed")
+                with self.assertRaises(ValidationError):
+                    self.store.export_to_action_request("private", name + "-wrong", "friend_request", {}, {}, {})
+                with self.assertRaises(ValidationError):
+                    self.store.record_result("private", "pending-" + name, "submitted_pending", "Wrong publication classification.", "source")
+                self.store.record_result("private", "result-" + name, "verified", "Synthetic separately verified action receipt.", "result-" + name)
+                with self.assertRaises(StateError):
+                    self.store.export_to_action_request("private", name + "-clone", name, {}, {}, {})
+        self.assertEqual(len(self.store.inspect("private")["results"]), len(names))
+
+    def test_management_candidate_data_cannot_be_silently_exported_as_new_content(self):
+        self.send()
+        choice = {"candidate_id": "edit", "text": "Replacement.", "source_ref": "actual-author-choice",
+                  "action_data": {"reason": "Correction", "original_snapshot": {"text": "Prior private version."}}}
+        self.answer("EDIT_OWN_CONTENT", [choice])
+        self.store.select_candidate("private", "t1", "edit", "exact-selected-replacement")
+        with self.assertRaises(StateError):
+            self.store.export_to_core_request("private", "case", "revision", {
+                "actor_id": "example-profile", "actor_kind": "profile", "destination_id": "example-target",
+                "action": "edit_own_content", "context_ref": "selected-original"})
+
+
+    def test_management_noop_receipt_does_not_reexport_same_choice_after_return(self):
+        self.send()
+        self.answer("UNFOLLOW_PAGE", [{"candidate_id": "unfollow", "source_ref": "choice",
+                                       "action_data": {"reason": "Do not want this source in feed."}}])
+        self.store.select_candidate("private", "t1", "unfollow", "actual-choice")
+        self.store.record_result("private", "noop", "verified", "Already not following; no action taken.",
+                                 {"action_taken": False, "source_ref": "actual-state"})
+        self.store.prepare_turn("private", "receipt", "Coda: already unfollowed; no action was needed.",
+                                purpose="return_result", result_id="noop", expects_response=False)
+        self.store.begin_dispatch("private", "receipt", "receipt-op")
+        self.store.record_sent("private", "receipt", "actual-saved-receipt", "actual-delivery-evidence")
+        packet = self.store.next_step_packet("private", turn_id="t1")
+        self.assertEqual(packet["host_step"], "respect_verified_action")
+        self.assertFalse(packet["output_required"])
+        with self.assertRaises(StateError):
+            self.store.export_to_action_request("private", "duplicate", "unfollow_page", {}, {}, {}, turn_id="t1")
+        self.send("new-choice")
+        self.answer("UNFOLLOW_PAGE", [{"candidate_id": "fresh", "source_ref": "genuinely-new-author-choice",
+                                       "action_data": {"reason": "A new later observation and selection."}}], turn="new-choice")
+        self.store.select_candidate("private", "new-choice", "fresh", "fresh-selection")
+        self.assertEqual(self.store.export_to_action_request("private", "fresh", "unfollow_page", {}, {}, {})["execution_state"], "not_executed")
+
+    def test_uncertain_management_choice_requires_reconciliation_before_new_export(self):
+        self.send()
+        self.answer("HIDE_POST", [{"candidate_id": "hide", "source_ref": "choice", "action_data": {"reason": "Repetitive item."}}])
+        self.store.select_candidate("private", "t1", "hide", "actual-choice")
+        self.store.record_result("private", "uncertain", "uncertain", "Result could not be observed.", "uncertain-source")
+        with self.assertRaises(StateError):
+            self.store.export_to_action_request("private", "duplicate", "hide_post", {}, {}, {})
+        self.store.reconcile_result("private", "uncertain", "not-sent", "failed_before_submit", "Observed no mutation occurred.", "positive-source")
+        self.assertEqual(self.store.export_to_action_request("private", "retry", "hide_post", {}, {}, {})["execution_state"], "not_executed")
 
 
 if __name__ == "__main__":

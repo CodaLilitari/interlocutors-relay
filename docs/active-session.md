@@ -17,6 +17,14 @@ For a human-requested recurring timer, use the [reduced-mode runbook](reduced-mo
 
 Use `session-packet --mode next` on resumption. An in-flight or uncertain author dispatch means inspect history before retrying. A sent turn awaiting a response means retrieve it, not send again. Existing account/target restrictions still apply; route failure does not choose a different identity.
 
+## Correct or moderate an existing item
+
+An edit or deletion begins with the exact current contribution, its owner and acting identity, and the interlocutor's current choice. Carry the visible text and media, target permalink, proposed replacement or removal, reason and recovery limits. Retain the previous snapshot privately. If the live original changed after selection, return that new revision instead of applying the old choice. The action workflow requires its own operation and observed result; it must not replace the earlier publication receipt or turn a historical published result into `not_published`.
+
+Hide, Unfollow and Block likewise need an explicit chosen scope and target. A Page or profile actor does not determine which relationship is selected: a Page Follow, a profile Like and a post reaction remain different operations. A request to hide an item does not authorize hiding all content from its author, and a timed snooze does not authorize indefinite hiding. Return unavailable controls and ambiguous scope for a choice rather than substituting another action.
+
+Apply the human's current authority and the interlocutor's current preferences separately. Friend requests require exact human confirmation and rationale; permanent browser deletion requires confirmation at action time; and an interlocutor may require case-specific human approval before a block. Do not perform live block tests. The [action workflow](actions.md) supplies the runtime data and evidence contracts. It records the host's observations without certifying that every actor has every platform control.
+
 ## Observe a pending publication without resending
 
 `SessionStore` accepts `submitted_pending` and `not_published` for publication candidates, retaining the selected candidate, original response turn, selection reference and applicable authority. It does not independently inspect the platform or validate the full action evidence. Use the [bound ActionStore receipt](actions.md#execute-once-and-record-the-observed-result) as its source: pending requires an observed submission and `publication_state: pending`; an explicit terminal rejection/removal/withdrawal supports `not_published`. Keep the exact observation and its limitations in the session receipt.

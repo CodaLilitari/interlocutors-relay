@@ -22,11 +22,14 @@ from relay_core import ConflictError, NotFoundError, StateError, ValidationError
 DISPOSITIONS = {
     "REPLY", "REACT", "SHARE", "SHARE_WITH_COMMENTARY", "ORIGINAL_POST", "IMAGE",
     "MESSAGE", "BLOCK", "FRIEND_REQUEST", "LIKE_PAGE", "FOLLOW_PAGE", "MULTIPLE",
+    "EDIT_OWN_CONTENT", "DELETE_OWN_CONTENT", "UNFOLLOW_PAGE", "UNFOLLOW_PROFILE", "HIDE_POST", "HIDE_SOURCE",
     "NEED_CONTEXT", "NEED_RESEARCH", "HOLD", "QUIET", "DISAGREE",
 }
 NON_OUTPUT = {"NEED_CONTEXT", "NEED_RESEARCH", "HOLD", "QUIET", "DISAGREE"}
 RESULT_OUTCOMES = {"verified", "uncertain", "failed_before_submit", "submitted_pending", "not_published"}
 _PUBLICATION_DISPOSITIONS = {"REPLY", "ORIGINAL_POST", "IMAGE", "SHARE", "SHARE_WITH_COMMENTARY"}
+_MANAGEMENT_DISPOSITIONS = {"EDIT_OWN_CONTENT", "DELETE_OWN_CONTENT", "UNFOLLOW_PAGE", "UNFOLLOW_PROFILE",
+                            "HIDE_POST", "HIDE_SOURCE", "BLOCK"}
 SESSION_METHODS = {
     "create_session", "prepare_turn", "begin_dispatch", "record_sent",
     "mark_uncertain", "reconcile_dispatch", "record_response", "select_candidate",
@@ -46,6 +49,12 @@ _DISPOSITION_ACTIONS = {
     "FRIEND_REQUEST": {"friend_request"},
     "LIKE_PAGE": {"like_page"},
     "FOLLOW_PAGE": {"follow_page"},
+    "EDIT_OWN_CONTENT": {"edit_own_content"},
+    "DELETE_OWN_CONTENT": {"delete_own_content"},
+    "UNFOLLOW_PAGE": {"unfollow_page"},
+    "UNFOLLOW_PROFILE": {"unfollow_profile"},
+    "HIDE_POST": {"hide_post"},
+    "HIDE_SOURCE": {"hide_source"},
 }
 
 
@@ -635,6 +644,10 @@ class SessionStore:
                      "verified": "respect_verified_publication"}
             return packet | {"host_step": steps[recorded["outcome"]], "result": recorded, "execution_state": recorded["outcome"],
                              "output_required": False}
+        recorded = self._management_result(session, turn, candidate)
+        if recorded is not None:
+            return packet | {"host_step": "respect_verified_action" if recorded["outcome"] == "verified" else "reconcile_before_retry",
+                             "result": recorded, "execution_state": recorded["outcome"], "output_required": False}
         return packet | {"host_step": "carry_selected_candidate_under_applicable_authority",
                          "content_state": "selected_candidate", "candidate": candidate,
                          "disposition": self._candidate_disposition(turn, candidate)}
@@ -651,9 +664,20 @@ class SessionStore:
                      and r["outcome"] in {"submitted_pending", "not_published", "verified"}), None)
 
     @classmethod
-    def _check_publication_not_repeated(cls, session, turn, candidate):
+    def _management_result(cls, session, turn, candidate):
+        if cls._candidate_disposition(turn, candidate) not in _MANAGEMENT_DISPOSITIONS:
+            return None
+        superseded = {r["reconciles_result_id"] for r in session["results"] if "reconciles_result_id" in r}
+        latest = next((r for r in reversed(session["results"]) if r["result_id"] not in superseded
+                       and r["turn_id"] == turn["turn_id"] and r["candidate"]["candidate_id"] == candidate["candidate_id"]), None)
+        return latest if latest and latest["outcome"] in {"verified", "uncertain"} else None
+
+    @classmethod
+    def _check_choice_not_repeated(cls, session, turn, candidate):
         if cls._publication_result(session, turn, candidate) is not None:
             raise StateError("selected candidate was already submitted; observe its publication outcome, do not export a new send")
+        if cls._management_result(session, turn, candidate) is not None:
+            raise StateError("selected management choice is completed or uncertain; inspect its result instead of exporting again")
 
     def export_to_core_request(self, session_id: str, case_id: str, revision_id: str,
                                binding: dict[str, Any], account_policy: Any = None, *,
@@ -670,7 +694,7 @@ class SessionStore:
 
         session = self.inspect(session_id)
         turn, candidate = self._selection(session, turn_id)
-        self._check_publication_not_repeated(session, turn, candidate)
+        self._check_choice_not_repeated(session, turn, candidate)
         disposition = self._candidate_disposition(turn, candidate)
         actions = {"REPLY": {"reply", "comment"}, "ORIGINAL_POST": {"post", "original_post"},
                    "IMAGE": {"post", "original_post", "reply", "comment"}}
@@ -716,7 +740,7 @@ class SessionStore:
         """
         session = self.inspect(session_id)
         turn, candidate = self._selection(session, turn_id)
-        self._check_publication_not_repeated(session, turn, candidate)
+        self._check_choice_not_repeated(session, turn, candidate)
         disposition = self._candidate_disposition(turn, candidate)
         _string(action, "action")
         if action not in _DISPOSITION_ACTIONS.get(disposition, set()):

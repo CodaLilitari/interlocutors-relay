@@ -157,6 +157,27 @@ class ExportReleaseTests(unittest.TestCase):
         with self.assertRaises(ReleaseExportError):
             self.export("account")
 
+    def test_scan_rejects_chat_conversations_in_plain_project_and_gpt_routes(self):
+        # Assemble synthetic links so the test source remains exportable.
+        # Project/GPT routing must not conceal a private conversation URL.
+        domains = ("chatgpt.com", "chat.openai.com")
+        routes = ("c/", "g/g-p-synthetic-project/c/", "g/g-synthetic-assistant/c/")
+        for index, (domain, route) in enumerate((domain, route) for domain in domains for route in routes):
+            with self.subTest(domain=domain, route=route):
+                link = "https://" + domain + "/" + route + "synthetic-conversation"
+                self.write("notes.md", "Saved conversation: " + link + "\n")
+                self.allow(["notes.md"])
+                with self.assertRaisesRegex(ReleaseExportError, "ChatGPT conversation URL"):
+                    self.export(f"conversation-{index}")
+
+    def test_scan_allows_public_gpt_links_without_conversation_routes(self):
+        link = "https://" + "chatgpt.com" + "/g/g-synthetic-public-assistant"
+        content = "Public assistant: " + link + "\n"
+        self.write("public.md", content)
+        self.allow(["public.md"])
+        result = self.export("public-gpt")
+        self.assertEqual((Path(result["destination"]) / "public.md").read_text(encoding="utf-8"), content)
+
     def test_credential_scan_allows_session_call_expressions_in_exported_source(self):
         expressions = [
             'session = commands.add_parser("session")',

@@ -18,6 +18,14 @@ Identical content updates `last_observed_at` without creating new work. Changed 
 
 The response includes `new_revision`, the current revision number and the next host step. Each observation must be at least as recent as the preceding observation for that item, so an older snapshot cannot overwrite a newer one.
 
+## Watched replies and post comment context
+
+When a reply watch is explicitly requested, inspect the named bounded thread independently of notification badges. Record the actual comment/reply identifiers and content revisions, including enough parent context to distinguish a reply from a top-level comment. Preserve unchanged observations without sending duplicate context; a materially edited reply is a new revision, not a new platform identifier.
+
+A selected post packet includes a bounded relevant comment sample with exact text, author, stable ID/link, reply relationships and actual scoped screenshots. Record the observed sorting and coverage, separating inspected comments from collapsed or uninspected branches. An actually opened empty panel supports only that observed empty view. No badge, hidden panel or empty local ledger proves that the post has no comments. Offer more comments from a named thread and an exact reply/reaction choice or quiet/private/hold; reading does not select an action.
+
+The runtime stream enum remains `notifications` or `messages`. Notification-origin replies can retain their bound comment IDs in that stream. Direct feed/timeline samples and independently opened watch threads without an actual notification/message source belong in the deployment's existing private source ledger, linked to their session/turn and saved delivery. Apply the same revision/progress distinctions there without inventing a `timeline` stream or fabricating a notification. Later observations through another surface retain their actual provenance.
+
 ## Record actual progress separately
 
 `record_source_progress(actor_id, stream, source_id, revision, stage, source_ref, observed_at, ...)` appends evidence to one exact revision. Stages remain independent:

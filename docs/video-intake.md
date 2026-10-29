@@ -16,6 +16,10 @@ Keep source files, transcripts, evidence and JSON records in the private runtime
 
 Save each returned intake record as a new private checkpoint before the next step. The helper returns copied JSON records and does not persist them itself. Its acceptance/review summaries are operator assessments supported by observations, not independent telemetry about a model's internal perception.
 
+Use [transport recovery](transport-recovery.md) when the upload route rejects an artifact, including safe exact-path file selection and a separately journaled status notice. A hash/decoder pass establishes local artifact properties, not a working uploader. Recheck attachment chips and saved delivery after any proposed repair.
+
+Label derived media explicitly. A contact sheet contains sampled frames at stated timestamps; it is neither the source's original album stills nor continuous-sequence inspection. Caption lyrics are source text, not an audio transcript. Keep probe evidence of no audio track separate from empty ASR output on a faint nonzero track; the latter remains unresolved without further evidence. Actual source media and these derived aids may be carried together, with each role and coverage identified.
+
 ## Record fields and transcript outcomes
 
 | Record | Required inputs and meaning |

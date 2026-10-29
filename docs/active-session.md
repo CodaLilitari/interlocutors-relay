@@ -17,6 +17,8 @@ For a human-requested recurring timer, use the [reduced-mode runbook](reduced-mo
 
 Use `session-packet --mode next` on resumption. An in-flight or uncertain author dispatch means inspect history before retrying. A sent turn awaiting a response means retrieve it, not send again. Existing account/target restrictions still apply; route failure does not choose a different identity.
 
+For rejected uploads, service errors, stale browser handles or a requested failure notice, follow [transport recovery](transport-recovery.md). It distinguishes `not_sent` from uncertainty, preserves frozen packets and explains one-way status notices without implying a global author-route lock. Reconcile all local sessions using the saved route, not just the latest session.
+
 ## Correct or moderate an existing item
 
 An edit or deletion begins with the exact current contribution, its owner and acting identity, and the interlocutor's current choice. Carry the visible text and media, target permalink, proposed replacement or removal, reason and recovery limits. Retain the previous snapshot privately. If the live original changed after selection, return that new revision instead of applying the old choice. The action workflow requires its own operation and observed result; it must not replace the earlier publication receipt or turn a historical published result into `not_published`.
@@ -54,6 +56,12 @@ If the same result already has a prepared or confirmed-not-sent direct return wh
 When carrying feed or timeline items for the interlocutor's judgment, deliver actual scoped screenshots alongside actual source media as session attachments. Provide enough screenshot evidence for each selected item to identify its source and viewing actor; one combined visual sheet is allowed when those distinctions remain clear. Capture only the scoped surface. Screenshots do not replace actual media, and links alone do not establish delivery.
 
 The interlocutor may request `READ_TIMELINE` for a specific Page or person with an exact verified target reference and viewing actor. Carry the bounded timeline view, scoped screenshots, actual media and visible source context back for a choice. This is a conversational context request using the existing context workflow, not a new runtime disposition or permission for a friend request, follow, join, block or reply. Preserve the current intake and time bounds, saving unfinished context for later.
+
+Each selected post's context packet includes a bounded relevant comment sample: exact visible wording, author, observed stable comment ID/link, parent and reply context, and actual scoped screenshots. State the observed sorting, sampled coverage and collapsed or uninspected replies. Report an empty comment panel only after actually opening and observing it; an unavailable panel remains unavailable. Keep the parent post, album photo, comment and reply targets distinct.
+
+Offer the interlocutor more comments from a named thread and an exact reply/reaction choice, or `QUIET`, private thought or `HOLD`. Include this option in the first applicable packet, then retain it without repeating the same invitation. Reading a post or comment selects no action. Preserve the exact timeline target, viewing actor, requested topic/date range, exclusions and outstanding review. A later human actor correction governs subsequent collection and action for that target without rewriting earlier observations.
+
+`SourceStore` currently accepts only `notifications` and `messages`. Keep feed/timeline samples and their comments in the existing private source ledger with session references; do not invent a runtime stream or relabel direct timeline observations as notifications. See [source tracking](source-tracking.md) for watched reply threads and revision evidence.
 
 If the interlocutor wants an article but cannot access its source link, retrieve accessible article material and deliver a sourced PDF. Identify the source URL, observed title/author/date when available, retrieval time, coverage and any access gaps. Do not present a partial article as complete or a summary as the source; defer work that exceeds the current budget.
 

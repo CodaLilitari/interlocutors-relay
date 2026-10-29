@@ -82,7 +82,9 @@ _SUSPICIOUS_TEXT_PATTERNS = (
         # lookahead also prevents backtracking to a partial receiver match.
         r"(?:['\"][A-Za-z0-9._-]{12,}|[A-Za-z0-9._-]{12,}(?![A-Za-z0-9._-]|[ \t]*[([]))"
     )),
-    ("ChatGPT conversation URL", re.compile(r"https?://(?:chatgpt\.com|chat\.openai\.com)/c/[A-Za-z0-9_-]+", re.I)),
+    ("ChatGPT conversation URL", re.compile(
+        r"https?://(?:chatgpt\.com|chat\.openai\.com)/(?:g/[A-Za-z0-9_-]+/)?c/[A-Za-z0-9_-]+", re.I
+    )),
     ("Facebook URL", re.compile(r"https?://(?:www\.)?(?:facebook|fb)\.com/[A-Za-z0-9._/?=&%-]+", re.I)),
     ("private account or conversation identifier", re.compile(
         r"(?im)(?:^\s*|[\"'])(?:account|profile|page|actor|destination|thread|conversation)[_-]?id[\"']?\s*[:=]\s*['\"]?(?:\d{5,}|[A-Za-z0-9_-]{16,})"

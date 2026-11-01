@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -282,6 +283,34 @@ class RelaySessionTests(unittest.TestCase):
         self.store.prepare_turn("private", "t2", "Please revise the choice.", purpose="continuation")
         with self.assertRaises(StateError):
             self.store.export_to_core_request("private", "case", "rev", binding)
+
+    def test_native_mention_selection_survives_action_export_and_refuses_plain_core_export(self):
+        from relay_actions import ActionStore, apply_action_request
+
+        self.send()
+        mentions = [{"start": 0, "end": 4, "text": "Alex", "target_id": "recipient-a",
+                     "target_url": "https://social.example/people/recipient-a"}]
+        selected = self.candidate("native-reply", "Alex, hello.") | {"action_data": {"mentions": mentions}}
+        self.answer("REPLY", [selected])
+        self.store.select_candidate("private", "t1", "native-reply", "actual-native-mention-choice")
+        binding = {"author_route": "example-thread", "actor_id": "page", "actor_kind": "page",
+                   "destination_id": "post", "action": "reply", "context_ref": "source",
+                   "reply_parent_id": "parent-comment", "audience": "public"}
+        with self.assertRaisesRegex(StateError, "action_data"):
+            self.store.export_to_core_request("private", "case", "rev", binding)
+        packet = self.store.export_to_action_request("private", "mentioned", "reply",
+            {"actor_id": "page", "actor_kind": "page", "source_ref": "actual-actor"},
+            {"destination_id": "post", "surface": "comment", "audience": "public",
+             "reply_parent_id": "parent-comment", "target_url": "https://social.example/comments/parent-comment"},
+            {"source_ref": "human-authority"})
+        with closing(ActionStore(self.path)) as actions:
+            for request in packet["requests"]:
+                apply_action_request(actions, request)
+            stored = actions.inspect("mentioned")
+            self.assertEqual(stored["candidate"]["action_data"], {"mentions": mentions})
+            self.assertEqual(stored["execution_state"], "not_started")
+            with self.assertRaises(ValidationError):
+                actions.begin_action("mentioned", "missing-preflight")
 
     def test_image_selection_preserves_attachment_and_exports_only_existing_metadata(self):
         self.send()

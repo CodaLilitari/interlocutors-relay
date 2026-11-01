@@ -80,10 +80,39 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(_json(value, "snapshot").encode("utf-8")).hexdigest()
 
 
+def _mentions(value: Any, text: str, label: str) -> list[dict[str, Any]]:
+    """Validate selected native links, using Python code-point half-open spans.
+
+    This preserves supplied identities; it neither detects names nor proves
+    that a platform rendered or notified any mentioned entity.
+    """
+    if not isinstance(value, list):
+        raise ValidationError(f"{label} must be an ordered mention list")
+    previous_end = 0
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"start", "end", "text", "target_id", "target_url"}:
+            raise ValidationError(f"{label} requires exact spans, text and native target identities")
+        start, end = item["start"], item["end"]
+        if (type(start) is not int or type(end) is not int
+                or not previous_end <= start < end <= len(text)):
+            raise ValidationError(f"{label} spans must be ordered, nonoverlapping code-point ranges")
+        _id(item["text"], f"{label}.text")
+        if text[start:end] != item["text"]:
+            raise ValidationError(f"{label}.text does not match the selected text slice")
+        _id(item["target_id"], f"{label}.target_id")
+        _https_url(item["target_url"], f"{label}.target_url")
+        previous_end = end
+    return value
+
+
+def _mention_aware(action: dict[str, Any]) -> bool:
+    return action["action"] in _CONTENT_ACTIONS and "mentions" in action["candidate"].get("action_data", {})
+
+
 def _snapshot(value: Any, label: str) -> dict[str, Any]:
     value = _object(value, label)
     fields = {"owner_id", "owner_kind", "revision_ref", "text", "media_refs"}
-    if set(value) != fields:
+    if set(value) not in (fields, fields | {"mentions"}):
         raise ValidationError(f"{label} requires owner, revision, exact text and ordered media references")
     _id(value["owner_id"], f"{label}.owner_id")
     if value["owner_kind"] not in {"page", "profile"}:
@@ -93,6 +122,8 @@ def _snapshot(value: Any, label: str) -> dict[str, Any]:
         raise ValidationError(f"{label} requires exact text and ordered media_refs")
     for ref in value["media_refs"]:
         _reference(ref, f"{label}.media_refs")
+    if "mentions" in value:
+        _mentions(value["mentions"], value["text"], f"{label}.mentions")
     return value
 
 
@@ -134,7 +165,11 @@ def _validate_guarded_plan(action: str, actor: dict[str, Any], target: dict[str,
             raise ValidationError("own-content mutation requires the acting identity to own the content")
         allowed.add("original_snapshot")
         if action == "edit_own_content":
-            allowed |= {"media_mode", "platform_media"}
+            allowed |= {"media_mode", "platform_media", "mentions"}
+            if ("mentions" in original) != ("mentions" in data):
+                raise ValidationError("rich edit requires explicit original and replacement mentions")
+            if "mentions" in data:
+                _mentions(data["mentions"], candidate.get("text", ""), "action_data.mentions")
             mode = data.get("media_mode")
             if mode not in {"preserve", "replace", "remove"}:
                 raise ValidationError("edit requires explicit preserve, replace or remove media_mode")
@@ -142,7 +177,8 @@ def _validate_guarded_plan(action: str, actor: dict[str, Any], target: dict[str,
             if (mode == "replace" and not new_media) or (mode != "replace" and new_media):
                 raise ValidationError("only replace media_mode may contain selected replacement media")
             after_media = _replacement_media(candidate)
-            if candidate.get("text", "") == original["text"] and after_media == original["media_refs"]:
+            if (candidate.get("text", "") == original["text"] and after_media == original["media_refs"]
+                    and data.get("mentions", []) == original.get("mentions", [])):
                 raise ValidationError("unchanged content is a no-op, not an edit operation")
             if not candidate.get("text", "").strip() and not after_media:
                 raise ValidationError("empty content requires a separately selected deletion")
@@ -211,6 +247,10 @@ def _publication_content(action: dict[str, Any]) -> dict[str, Any]:
     data = candidate.get("action_data", {})
     attachments = candidate.get("attachments", [])
     return {"text": candidate.get("text", ""),
+            # The exact URL remains in the immutable action and rendered-link
+            # checks. URL aliases cannot make the same entity a new submission.
+            "mentions": [{key: item[key] for key in ("start", "end", "text", "target_id")}
+                         for item in data.get("mentions", [])],
             "attachments": [{"sha256": item["sha256"], "byte_size": item["byte_size"],
                              "alt_text": attachment.get("alt_text", attachment.get("core_media", {}).get("alt_text"))}
                             for item, attachment in zip(action.get("local_attachments", []), attachments)],
@@ -343,7 +383,8 @@ class ActionStore(Store):
             if other["target"]["destination_id"] != action["target"]["destination_id"]:
                 continue
             own = action["action"] in _OWN_CONTENT_ACTIONS and other["action"] in _OWN_CONTENT_ACTIONS
-            same_state = (own and other["target"].get("current_snapshot") == action["target"]["current_snapshot"])
+            same_state = (own and other["target"]["current_snapshot"]["revision_ref"]
+                          == action["target"]["current_snapshot"]["revision_ref"])
             if not own and other["action"] == action["action"]:
                 same_state = other["target"].get("state_revision_ref") == action["target"].get("state_revision_ref")
             same_choice = (other["action"] == action["action"]
@@ -387,12 +428,15 @@ class ActionStore(Store):
                 expected["deletion_mode"] = data["deletion_mode"]
                 if data["deletion_mode"] == "recoverable":
                     expected["recovery_description"] = data["recovery_description"]
-        else:
+        elif action["action"] in _MODERATION_STATES:
             field, before, _, _ = _MODERATION_STATES[action["action"]]
             expected[field] = before
             expected["state_revision_ref"] = action["target"]["state_revision_ref"]
             if action["action"] == "block":
                 expected["block_scope"] = data["block_scope"]
+        if _mention_aware(action):
+            expected.update(text=action["candidate"].get("text", ""), rendered_mentions=data["mentions"])
+            _mentions(evidence.get("rendered_mentions"), expected["text"], "preflight_evidence.rendered_mentions")
         cls._matches(evidence, expected, "preflight_evidence")
         return evidence
 
@@ -498,6 +542,11 @@ class ActionStore(Store):
         action_data = candidate.get("action_data", {})
         if not isinstance(action_data, dict):
             raise ValidationError("candidate.action_data must be an object")
+        if "mentions" in action_data:
+            if action not in _CONTENT_ACTIONS:
+                raise ValidationError("mentions apply only to selected content actions")
+            _mentions(action_data["mentions"], candidate.get("text", ""), "action_data.mentions")
+            _https_url(target.get("target_url"), "target.target_url")
         platform_media = action_data.get("platform_media")
         if platform_media is not None:
             if not isinstance(platform_media, dict) or platform_media.get("kind") not in {"gif", "image"}:
@@ -591,11 +640,11 @@ class ActionStore(Store):
             if duplicate is not None:
                 raise StateError(f"selected mutation repeats completed choice or consumed snapshot {duplicate}")
             preflight, delete_confirmation, blocking = None, None, None
-            if action["action"] in _GUARDED_ACTIONS:
+            if action["action"] in _GUARDED_ACTIONS or _mention_aware(action):
                 _validate_guarded_plan(action["action"], action["actor"], action["target"], action["candidate"])
                 preflight = self._preflight(action, preflight_evidence)
             elif preflight_evidence is not None:
-                raise ValidationError("preflight_evidence applies only to explicit content-management/moderation actions")
+                raise ValidationError("preflight_evidence applies only to content-management/moderation or mention-aware content actions")
             if action["action"] == "delete_own_content" and action["candidate"]["action_data"]["deletion_mode"] == "permanent":
                 delete_confirmation = self._confirmation(action, permanent_delete_confirmation, "permanent_delete_confirmation", preflight, operation_id)
             elif permanent_delete_confirmation is not None:
@@ -659,6 +708,9 @@ class ActionStore(Store):
                 raise ValidationError("verified evidence cannot describe a pending or unpublished result")
             if evidence.get("submission_observed") is False or evidence.get("positive_no_submit") is True:
                 raise ValidationError("verified evidence cannot deny submission")
+        if outcome in {"verified", "submitted_pending"} and not _mention_aware(action):
+            if "rendered_mentions" in evidence:
+                raise ValidationError("unselected native mention evidence cannot verify a legacy content plan")
         if outcome in {"verified", "submitted_pending", "not_published"}:
             expected = ActionStore._bound_evidence(action)
             if action["action"] in _CONTENT_ACTIONS:
@@ -678,6 +730,10 @@ class ActionStore(Store):
                     _reference(observation.get("source_ref"), "attachment observation.source_ref")
                     _id(observation.get("observation"), "attachment observation.observation")
             action_data = action["candidate"].get("action_data", {})
+            if _mention_aware(action) and outcome in {"verified", "submitted_pending"}:
+                expected.update(target_url=action["target"]["target_url"], rendered_mentions=action_data["mentions"])
+                _mentions(evidence.get("rendered_mentions"), action["candidate"].get("text", ""),
+                          "evidence.rendered_mentions")
             if action["action"] == "react":
                 expected["reaction"] = action_data["reaction"]
             if action["action"] in _PAGE_RELATIONSHIP_STATES:
@@ -694,6 +750,8 @@ class ActionStore(Store):
                         expected["content_state"] = "edited"
                         expected["media_mode"] = action_data["media_mode"]
                         result_snapshot = _snapshot(evidence.get("result_snapshot"), "evidence.result_snapshot")
+                        if not _mention_aware(action) and "mentions" in result_snapshot:
+                            raise ValidationError("unselected native mentions cannot verify a legacy edit")
                         if result_snapshot["revision_ref"] == original["revision_ref"]:
                             raise ValidationError("edited content needs a newly observed revision reference")
                         ActionStore._matches(result_snapshot, {
@@ -701,6 +759,9 @@ class ActionStore(Store):
                             "text": action["candidate"].get("text", ""),
                             "media_refs": _replacement_media(action["candidate"]),
                         }, "evidence.result_snapshot")
+                        if _mention_aware(action):
+                            ActionStore._matches(result_snapshot, {"mentions": action_data["mentions"]},
+                                                 "evidence.result_snapshot")
                     else:
                         recoverable = action_data["deletion_mode"] == "recoverable"
                         expected.update(deletion_mode=action_data["deletion_mode"], deletion_observed=True,

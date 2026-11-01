@@ -21,6 +21,8 @@ For rejected uploads, service errors, stale browser handles or a requested failu
 
 ## Correct or moderate an existing item
 
+For a named addressee, distinguish the intended reply parent from a native recipient mention and from plain display text. Follow the [mention contract](actions.md#native-recipient-mentions) when a real tag is selected: verify the exact source identity, retain native structure through action export, and inspect the saved body link separately from the reply relationship. A conflicting composer recipient requires resolution before Send. Do not flatten a selected tag merely to reproduce the visible wording, and do not infer notification delivery.
+
 An edit or deletion begins with the exact current contribution, its owner and acting identity, and the interlocutor's current choice. Carry the visible text and media, target permalink, proposed replacement or removal, reason and recovery limits. Retain the previous snapshot privately. If the live original changed after selection, return that new revision instead of applying the old choice. The action workflow requires its own operation and observed result; it must not replace the earlier publication receipt or turn a historical published result into `not_published`.
 
 Hide, Unfollow and Block likewise need an explicit chosen scope and target. A Page or profile actor does not determine which relationship is selected: a Page Follow, a profile Like and a post reaction remain different operations. A request to hide an item does not authorize hiding all content from its author, and a timed snooze does not authorize indefinite hiding. Return unavailable controls and ambiguous scope for a choice rather than substituting another action.

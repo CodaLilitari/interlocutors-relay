@@ -1,5 +1,6 @@
 import hashlib
 import copy
+import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -22,6 +23,19 @@ def target(surface="message_thread", audience="private", parent=None):
 def candidate(text="", data=None, attachments=None):
     return {"candidate_id": "choice-a", "text": text, "attachments": attachments or [],
             "action_data": data or {}, "source_ref": "author-candidate-reference", "response_ref": "author-response-reference"}
+
+
+def mention(start=0, end=4, text="Alex", target_id="recipient-a", target_url="https://social.example/people/recipient-a"):
+    return {"start": start, "end": end, "text": text, "target_id": target_id, "target_url": target_url}
+
+
+def mention_edit(before=None, after=None):
+    destination, selected = management_plan("edit_own_content")
+    for snapshot in (destination["current_snapshot"], selected["action_data"]["original_snapshot"]):
+        snapshot.update(text="Alex, hello.", media_refs=[], mentions=[] if before is None else before)
+    selected["text"] = "Alex, hello."
+    selected["action_data"]["mentions"] = [mention()] if after is None else after
+    return destination, selected
 
 
 def management_plan(action, acting=None, *, surface=None, deletion_mode="recoverable"):
@@ -1022,6 +1036,209 @@ class RelayActionTests(unittest.TestCase):
         self.assertEqual(saved["operations"][0]["observations"][0]["evidence"]["edit_revision_state"], "pending")
         self.assertEqual(saved["target"]["current_snapshot"]["text"], "Original exact text.")
         self.assertEqual(saved["execution_state"], "verified")
+
+
+    def test_mentions_validate_exact_unicode_spans_and_identity(self):
+        selected = candidate("🌙 Alex, hello.", {"mentions": [mention(2, 6)]})
+        destination = target("comment", "public", "parent-comment")
+        destination["target_url"] = "https://social.example/comments/parent-comment"
+        document = self.create("valid-mention", "reply", selected=selected, destination=destination)
+        self.assertEqual(document["candidate"]["action_data"]["mentions"], [mention(2, 6)])
+        invalid = [None, {}, [mention(True, 6)], [mention(2, True)], [mention(-1, 4)],
+                   [mention(2, 20)], [mention(2, 2, "")], [mention(2, 6, "Alec")],
+                   [mention(3, 7)], [mention(2, 6, target_id="")],
+                   [mention(2, 6, target_url="http://social.example/people/a")],
+                   [mention(2, 6) | {"notification_sent": True}], [mention(2, 6), mention(2, 6)]]
+        for index, mentions in enumerate(invalid):
+            with self.subTest(mentions=mentions), self.assertRaises(ValidationError):
+                self.create(f"bad-mention-{index}", "reply", destination=destination,
+                            selected=candidate("🌙 Alex, hello.", {"mentions": mentions}))
+        with self.assertRaises(ValidationError):
+            self.create("noncontent", "react", destination=destination,
+                        selected=candidate(data={"reaction": "LOVE", "mentions": []}))
+
+    def test_same_text_native_mention_edit_and_removal_are_real_revisions(self):
+        for index, (before, after) in enumerate((([], [mention()]), ([mention()], []),
+                ([mention()], [mention(target_id="recipient-b", target_url="https://social.example/people/recipient-b")]))):
+            destination, selected = mention_edit(before, after)
+            action_id, operation_id = f"rich-edit-{index}", f"rich-op-{index}"
+            destination["destination_id"] = f"rich-object-{index}"
+            selected["action_data"]["target_id"] = destination["destination_id"]
+            try:
+                original = self.create(action_id, "edit_own_content", destination=destination, selected=selected)
+            except ValidationError as exc:
+                self.fail(f"A selected native-mention change is not a text/media no-op: {exc}")
+            preflight = self.preflight(action_id) | {"rendered_mentions": after}
+            self.store.begin_action(action_id, operation_id, preflight_evidence=preflight)
+            result = self.management_result(action_id) | {"rendered_mentions": after}
+            result["result_snapshot"]["mentions"] = after
+            self.store.record_outcome(operation_id, "verified", result)
+            saved = self.store.inspect(action_id)
+            self.assertEqual(saved["target"]["current_snapshot"]["mentions"], before)
+            self.assertEqual(saved["original_snapshot_sha256"], original["original_snapshot_sha256"])
+            self.assertEqual(saved["execution_state"], "verified")
+        destination, selected = mention_edit([mention()], [mention()])
+        with self.assertRaisesRegex(ValidationError, "no-op"):
+            self.create("unchanged-rich", "edit_own_content", destination=destination, selected=selected)
+
+    def test_rich_edit_requires_explicit_original_and_replacement_mentions(self):
+        destination, selected = mention_edit()
+        for snapshot in (destination["current_snapshot"], selected["action_data"]["original_snapshot"]):
+            del snapshot["mentions"]
+        selected["text"] = "Alex, changed."
+        with self.assertRaises(ValidationError):
+            self.create("unobserved-original", "edit_own_content", destination=destination, selected=selected)
+        for index, before in enumerate(([], [mention()])):
+            destination, selected = mention_edit(before)
+            del selected["action_data"]["mentions"]
+            selected["text"] = "Alex, changed."
+            with self.assertRaises(ValidationError):
+                self.create(f"implicit-replacement-{index}", "edit_own_content", destination=destination, selected=selected)
+
+    def test_mention_preflight_binds_actual_parent_and_rendered_link_before_claim(self):
+        destination = target("comment", "public", "parent-comment")
+        destination["target_url"] = "https://social.example/comments/parent-comment"
+        self.create("a1", "reply", destination=destination, selected=candidate("Alex, hello.", {"mentions": [mention()]}))
+        evidence = self.preflight() | {"rendered_mentions": [mention()]}
+        invalid = [None, self.preflight(), evidence | {"reply_parent_id": "different-comment"},
+                   evidence | {"actor_id": "other-actor"}, evidence | {"rendered_mentions": []},
+                   evidence | {"rendered_mentions": [mention(target_id="other-person")]},
+                   evidence | {"observed_at": (datetime.now(timezone.utc) - timedelta(minutes=6)).isoformat()}]
+        for item in invalid:
+            with self.subTest(evidence=item), self.assertRaises(ValidationError):
+                self.store.begin_action("a1", "op1", preflight_evidence=item)
+            self.assertEqual(self.store.inspect("a1")["execution_state"], "not_started")
+        self.assertTrue(self.store.begin_action("a1", "op1", preflight_evidence=evidence)["newly_claimed"])
+
+    def test_mention_result_requires_persisted_link_and_keeps_guard_on_rejected_evidence(self):
+        destination = target("comment", "public", "parent-comment")
+        destination["target_url"] = "https://social.example/comments/parent-comment"
+        self.create("a1", "reply", destination=destination, selected=candidate("Alex, hello.", {"mentions": [mention()]}))
+        self.store.begin_action("a1", "op1", preflight_evidence=self.preflight() | {"rendered_mentions": [mention()]})
+        evidence = self.evidence() | {"target_url": destination["target_url"], "rendered_mentions": [mention()]}
+        for outcome in ("verified", "submitted_pending"):
+            base = evidence | ({"submission_observed": True, "publication_state": "pending"} if outcome == "submitted_pending" else {})
+            invalid = [{key: value for key, value in base.items() if key != "rendered_mentions"},
+                       base | {"rendered_mentions": []}, base | {"rendered_mentions": [mention(target_id="other-person")]},
+                       base | {"rendered_mentions": [mention(target_url="https://social.example/people/other")]},
+                       base | {"rendered_mentions": [mention(1, 5)]}, base | {"reply_parent_id": "wrong-parent"}]
+            for item in invalid:
+                with self.subTest(outcome=outcome, evidence=item), self.assertRaises(ValidationError):
+                    self.store.record_outcome("op1", outcome, item)
+                self.assertEqual(self.store.inspect("a1")["execution_state"], "in_flight")
+        self.create("unrelated")
+        with self.assertRaisesRegex(StateError, "shared delivery"):
+            self.store.begin_action("unrelated", "unrelated-op")
+        self.store.record_outcome("op1", "verified", evidence)
+        self.assertTrue(self.store.begin_action("unrelated", "unrelated-op")["newly_claimed"])
+
+    def test_rich_edit_result_snapshot_cannot_omit_or_change_selected_mentions(self):
+        destination, selected = mention_edit([mention()], [])
+        self.create("a1", "edit_own_content", destination=destination, selected=selected)
+        self.store.begin_action("a1", "op1", preflight_evidence=self.preflight() | {"rendered_mentions": []})
+        evidence = self.management_result() | {"rendered_mentions": []}
+        for before in ([mention()], None):
+            wrong = copy.deepcopy(evidence)
+            if before is None:
+                del wrong["result_snapshot"]["mentions"]
+            else:
+                wrong["result_snapshot"]["mentions"] = before
+            with self.assertRaises(ValidationError):
+                self.store.record_outcome("op1", "verified", wrong)
+        evidence["result_snapshot"]["mentions"] = []
+        self.store.record_outcome("op1", "verified", evidence)
+
+    def test_legacy_snapshot_shape_and_digest_do_not_gain_unobserved_mentions(self):
+        destination, selected = management_plan("edit_own_content")
+        original = copy.deepcopy(destination["current_snapshot"])
+        expected_digest = hashlib.sha256(json.dumps(original, ensure_ascii=False, sort_keys=True,
+                                                    separators=(",", ":")).encode("utf-8")).hexdigest()
+        self.create("a1", "edit_own_content", destination=destination, selected=selected)
+        self.store.begin_action("a1", "op1", preflight_evidence=self.preflight())
+        self.store.record_outcome("op1", "verified", self.management_result())
+        stored = self.store.inspect("a1")
+        self.assertEqual(stored["original_snapshot_sha256"], expected_digest)
+        self.assertEqual(stored["target"]["current_snapshot"], original)
+        self.assertNotIn("mentions", stored["target"]["current_snapshot"])
+        self.assertNotIn("rendered_mentions", stored["operations"][0]["preflight_evidence"])
+
+    def test_pending_publication_duplicate_uses_mention_semantics_not_only_visible_text(self):
+        destination = target("comment", "public", "parent-comment")
+        destination["target_url"] = "https://social.example/comments/parent-comment"
+        self.create("a1", "reply", destination=destination, selected=candidate("Alex, hello.", {"mentions": [mention()]}))
+        self.store.begin_action("a1", "op1", preflight_evidence=self.preflight() | {"rendered_mentions": [mention()]})
+        self.store.record_outcome("op1", "submitted_pending", self.pending_evidence() | {
+            "target_url": destination["target_url"], "rendered_mentions": [mention()]})
+        clone = candidate("Alex, hello.", {"mentions": [mention()]})
+        clone.update(candidate_id="new-local-id", source_ref="different-evidence")
+        self.create("clone", "reply", destination=destination, selected=clone)
+        with self.assertRaisesRegex(StateError, "duplicates submitted"):
+            self.store.begin_action("clone", "clone-op", preflight_evidence=self.preflight("clone") | {"rendered_mentions": [mention()]})
+        different = [mention(target_id="recipient-b", target_url="https://social.example/people/recipient-b")]
+        clone["action_data"]["mentions"] = different
+        self.create("distinct", "reply", destination=destination, selected=clone)
+        self.assertTrue(self.store.begin_action("distinct", "distinct-op",
+            preflight_evidence=self.preflight("distinct") | {"rendered_mentions": different})["newly_claimed"])
+
+    def test_legacy_edit_cannot_verify_unselected_native_mentions(self):
+        destination, selected = management_plan("edit_own_content")
+        self.create("a1", "edit_own_content", destination=destination, selected=selected)
+        self.store.begin_action("a1", "op1", preflight_evidence=self.preflight())
+        result = self.management_result()
+        unselected = [mention(0, 11, "Replacement")]
+        unexpected = copy.deepcopy(result)
+        unexpected["result_snapshot"]["mentions"] = unselected
+        with self.assertRaises(ValidationError):
+            self.store.record_outcome("op1", "verified", unexpected)
+        with self.assertRaises(ValidationError):
+            self.store.record_outcome("op1", "verified", result | {"rendered_mentions": unselected})
+        self.assertEqual(self.store.inspect("a1")["execution_state"], "in_flight")
+        self.create("unrelated")
+        with self.assertRaisesRegex(StateError, "shared delivery"):
+            self.store.begin_action("unrelated", "unrelated-op")
+        self.store.record_outcome("op1", "verified", result)
+        self.assertEqual(self.store.inspect("a1")["execution_state"], "verified")
+
+    def test_rich_snapshot_decoration_cannot_revive_consumed_owned_revision(self):
+        destination, selected = management_plan("edit_own_content")
+        self.create("a1", "edit_own_content", destination=destination, selected=selected)
+        self.store.begin_action("a1", "op1", preflight_evidence=self.preflight())
+        self.store.record_outcome("op1", "verified", self.management_result())
+        destination["current_snapshot"]["mentions"] = []
+        selected["action_data"]["original_snapshot"]["mentions"] = []
+        selected["action_data"]["mentions"] = []
+        selected.update(candidate_id="new-local-candidate", source_ref="new-evidence")
+        self.create("decorated", "edit_own_content", destination=destination, selected=selected)
+        with self.assertRaisesRegex(StateError, "consumed snapshot"):
+            self.store.begin_action("decorated", "decorated-op",
+                                    preflight_evidence=self.preflight("decorated") | {"rendered_mentions": []})
+        self.assertEqual(self.store.inspect("decorated")["execution_state"], "not_started")
+        for snapshot in (destination["current_snapshot"], selected["action_data"]["original_snapshot"]):
+            snapshot["revision_ref"] = "actually-observed-new-revision"
+        selected.update(candidate_id="new-revision-selection", source_ref="new-author-choice")
+        self.create("new-revision", "edit_own_content", destination=destination, selected=selected)
+        self.assertTrue(self.store.begin_action("new-revision", "new-revision-op",
+            preflight_evidence=self.preflight("new-revision") | {"rendered_mentions": []})["newly_claimed"])
+        self.assertNotIn("mentions", self.store.inspect("a1")["target"]["current_snapshot"])
+
+    def test_pending_native_mention_url_alias_cannot_repeat_same_submission(self):
+        destination = target("comment", "public", "parent-comment")
+        destination["target_url"] = "https://social.example/comments/parent-comment"
+        self.create("a1", "reply", destination=destination, selected=candidate("Alex, hello.", {"mentions": [mention()]}))
+        self.store.begin_action("a1", "op1", preflight_evidence=self.preflight() | {"rendered_mentions": [mention()]})
+        self.store.record_outcome("op1", "submitted_pending", self.pending_evidence() | {
+            "target_url": destination["target_url"], "rendered_mentions": [mention()]})
+        alias = [mention(target_url="https://social.example/people/recipient-a?ref=reply")]
+        clone = candidate("Alex, hello.", {"mentions": alias})
+        clone.update(candidate_id="alias-candidate", source_ref="alias-source", response_ref="alias-response")
+        self.create("alias", "reply", destination=destination, selected=clone)
+        with self.assertRaisesRegex(StateError, "duplicates submitted"):
+            self.store.begin_action("alias", "alias-op",
+                                    preflight_evidence=self.preflight("alias") | {"rendered_mentions": alias})
+        self.assertEqual(self.store.inspect("alias")["execution_state"], "not_started")
+        self.assertEqual(self.store.inspect("a1")["execution_state"], "submitted_pending")
+        self.create("unrelated")
+        self.assertTrue(self.store.begin_action("unrelated", "unrelated-op")["newly_claimed"])
 
 
 if __name__ == "__main__":

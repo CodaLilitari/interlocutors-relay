@@ -44,11 +44,15 @@ After a verified `not_sent` outcome and restored access, resume the **same turn*
 
 ## Rejected uploads and safe file selection
 
-An error such as "File is empty" does not prove a nonempty local file is corrupt. Confirm its exact size/hash and applicable decoding separately from the upload evidence. A reported extension permission change is a proposed repair until a fresh exact-file attempt succeeds. One failed retry is not a reason to repeat the same operation indefinitely.
+An error such as "File is empty" does not prove a nonempty local file is corrupt. A successful `setFiles` call proves neither browser-readable bytes nor upload acceptance. Record local size/hash and applicable decoding separately from the browser's reported file size and actual byte-read result. A zero-size browser file or read error with a verified nonempty local source narrows the failure to the transfer boundary; it does not establish its cause. A reported extension permission change is a proposed repair until a fresh exact-file attempt succeeds. One failed retry is not a reason to repeat the same operation indefinitely.
+
+If permitted, use one controlled local probe with a non-sensitive, nonempty file and an exact-path allowlist. Compare its known size/hash with bytes read by the browser on a supported local test page. The probe sends nothing to the service and changes no security controls. A policy denial stops the affected route; do not use another mechanism to bypass it.
+
+A supported browser download may provide a working copy route. Use the exact destination returned by that operation, never an assumed Downloads or application-data path or a broad folder search. Preserve the source and privately map each allowlisted copy to its original size/hash. Keep frozen selected attachment references intact; record the alternate exact path in a private transport mapping. Identical bytes at a different path are not new media. Changed bytes, ordering or author-visible packet content require the existing explicit revision workflow. Compare browser-readable copy bytes with the source, then verify the actual packet files: one working control file does not validate the packet. If both location and creation method changed, report a verified route for those files, not a proven root cause or universal repair.
 
 Resolve an explicit allowlist of exact absolute files before opening a chooser. Prefer a supported direct file-chooser API or exact keyboard path entry. If a native picker opens in an unexpected directory, cancel it by keyboard without taking a screenshot. Do not inspect recent files, thumbnails or unrelated directories. If the correct native window/focus cannot be established safely, stop that route and preserve the blocker.
 
-Before Send, verify every attachment chip against the allowlist and check that no extra file is present. A filename in prose, a checksum, a local path or a successful decoder is not an attachment. After Send, inspect the saved message and its attachments. Record what was verified; do not claim remote byte identity unless it was actually checked.
+Before Send, verify every attachment chip against the allowlist and check that no extra file is present. A filename in prose, a checksum, a local path or a successful decoder is not an attachment. After Send, bind the exact saved message and ordered attachments. Where supported, recover the saved attachment bytes and compare their size/hash with the source; otherwise record that coverage gap. Matching names or chips do not prove byte identity. Record the interlocutor's actual inspection separately from successful transport.
 
 ## Tell the interlocutor when transport is blocked
 
@@ -66,9 +70,17 @@ Journal and verify the notice through the same dispatch API as any other message
 
 A browser-control timeout does not establish that a saved conversation is gone, full or disconnected. Reuse the canonical route and obtain a fresh tab binding through supported inventory if the old handle is stale. A separately authorized saved-thread reader may supply history when browser control fails; its success does not prove that uploads or sends work. Never switch tools, accounts or conversations to bypass an actual service restriction.
 
-Before new authoring, verify the actual account/workspace, selected model and mode through supported metadata or visible controls. Store requested and observed settings separately. Hidden/template warning text unrelated to the selected control is not by itself an observed lock or usage limit; equally, a model's self-description is not proof of the selected setting. Reconcile conflicting evidence before acting.
+A native URL-confidence error concerns window or route binding, not file corruption. Establish the intended and observed window, tab and URL through supported controls before using a chooser. A foreground/background mismatch remains a hypothesis until observations corroborate it. If safe binding is unavailable or policy denies access, stop that route rather than forcing a different mechanism.
+
+Before new authoring, verify the actual account/workspace, selected model and mode through supported metadata or visible controls. Renew this check after reconnecting or replacing the tab binding; prior settings and "no change made" are not fresh evidence. If the required controls or metadata are unavailable, record the setting as unverified and hold new authoring. Store requested and observed settings separately. Hidden/template warning text unrelated to the selected control is not by itself an observed lock or usage limit; equally, a model's self-description is not proof of the selected setting. Reconcile conflicting evidence before acting.
 
 Create a replacement remote conversation only under the human's applicable authorization and after observing that the designated route is inaccessible. A transient control failure alone is insufficient. Preserve the historical route, session, pending operations and any unrecovered history; record the new canonical route and actual handoff delivery separately. Do not call the old conversation full unless that condition was observed. A replacement introduction is sent once, not replayed each time a window resumes.
+
+## Recover a response omitted by a reader
+
+A saved-thread connector may omit a completed response still visible in the conversation. Inspect the same saved route through the supported semantic browser view and, when needed, reopen it to check persistence. Preserve the actual message ID, author role, ordered text and meaningful structure, completion evidence, and the connector's coverage limitation. Label the evidence by its actual source; semantic or DOM capture is not clipboard capture unless the clipboard was used.
+
+Reconcile that response to the existing turn without repeating its prompt. Partial, still-generating or ambiguously bound content remains pending. A completed visible response does not independently prove media inspection; retain the author's specific claims and any access limits.
 
 ## Private recovery checkpoint
 

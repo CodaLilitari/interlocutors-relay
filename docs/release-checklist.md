@@ -8,6 +8,8 @@ The October 23 source follow-up adds [source progress tracking](source-tracking.
 
 The October 29 source follow-up adds [transport recovery](transport-recovery.md), bounded comment context and directed-review continuity, plus export-scan protection for project/GPT conversation links. The current allowlist contains **52 files**. Source and clean-export suites each ran **195 tests: 194 passed and one existing Windows symlink fixture skipped**. Final documentation receipts and review clarifications leave the tested runtime/test bytes unchanged. These changes do not certify repair of a live upload route or update the frozen archive.
 
+The November 1 source follow-up adds exact native-mention plans, staged and saved-link checks, rich edits with unchanged visible text, and stable revision/entity duplicate protection. Host instructions cover byte-verified transport copies and evidence-qualified saved-response recovery. Source and clean 52-file export suites each ran **207 tests: 206 passed and the existing Windows symlink fixture skipped**. Independent review reproduced and closed three edge cases, then checked malformed evidence and seven operator scenarios. The final documentation receipt preserves tested Python bytes; this source update performs no live account actions and does not replace the frozen archive.
+
 ## Implemented local components
 
 - Standard-library Python state store with SQLite transactions and explicit revisions.

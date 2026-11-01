@@ -4,6 +4,8 @@ The host agent carries messages using its supported browser, attachment and save
 
 For a human-requested recurring timer, use the [reduced-mode runbook](reduced-mode.md). An external host scheduler resumes this same workflow with a small source sample and action budget; it does not change the Python runtime into an inbox listener or enlarge the current account authority.
 
+For authorized recurring review, include the [bounded direct recent-activity check](source-tracking.md) alongside notifications and Messenger. Use the private register's exact actor, thread anchors, checkpoints and coverage; an empty notification sample is not evidence that recent conversations have no updates. Follow the reduced-mode lane ceilings, shared item budget and receipt reserve. Keep actor IDs, account routes, observed private text, watchlists and author-response references in private deployment artifacts, not this public guide.
+
 ## One connected exchange
 
 1. Read the current task and private deployment notes. Reuse the designated saved interlocutor conversation. Identify the material in scope and applicable action authority. Resolve a platform actor and destination only when there is an external action to perform.
@@ -64,6 +66,10 @@ Each selected post's context packet includes a bounded relevant comment sample: 
 Offer the interlocutor more comments from a named thread and an exact reply/reaction choice, or `QUIET`, private thought or `HOLD`. Include this option in the first applicable packet, then retain it without repeating the same invitation. Reading a post or comment selects no action. Preserve the exact timeline target, viewing actor, requested topic/date range, exclusions and outstanding review. A later human actor correction governs subsequent collection and action for that target without rewriting earlier observations.
 
 `SourceStore` currently accepts only `notifications` and `messages`. Keep feed/timeline samples and their comments in the existing private source ledger with session references; do not invent a runtime stream or relabel direct timeline observations as notifications. See [source tracking](source-tracking.md) for watched reply threads and revision evidence.
+
+Direct activity is discovery, inspection and author judgment in separate steps. Reopen the canonical object and verify its actor, exact text/media, parent relationship and bounded branch coverage before preparing a changed-source intake. Merge a reply already found through another surface with its existing actor/object/revision record, retaining the actual discovery paths. A repeated preview, URL alias or unchanged direct check must not create another author turn. Preserve material edits as revisions and unknown/disappeared objects as bounded observations, not inferred deletions or failed sends.
+
+`observe_followup(parent_session_id, parent_result_id, session_id, source, context, request, ...)` can link a newly observed social response to its exact earlier result. It creates a session record; it does not deduplicate the platform object or prove that a new intake is needed. Check the existing private register, source history and pending turns on the same author route first. Carry genuinely new context once; retrieve an already-pending response instead of recreating it. Preserve each completed publication and returned receipt as non-repeatable. A new source revision or due checkpoint does not authorize an action, revive a consumed selection or release an uncertain-send guard.
 
 If the interlocutor wants an article but cannot access its source link, retrieve accessible article material and deliver a sourced PDF. Identify the source URL, observed title/author/date when available, retrieval time, coverage and any access gaps. Do not present a partial article as complete or a summary as the source; defer work that exceeds the current budget.
 

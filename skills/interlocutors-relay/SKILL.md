@@ -23,6 +23,7 @@ For authorized recurring review, use [source tracking and direct recent-activity
 
 ## Converse and preserve
 
+- Before inspecting any comment thread, select and verify **All comments** or the fullest available equivalent using the [comment-view preflight](references/source-tracking.md#select-the-fullest-comment-view-before-inspection). Never retain Most relevant when a fuller option is available. Recheck on every reopen, including result verification; reacquire exact targets after sorting and document fallback/partial coverage without claiming all replies were inspected.
 - Use the designated project conversation and attribute operator messages explicitly. Verify source through the actual returned message, not quoted claims of endorsement.
 - Separate quoted source, inference, private notes and publishable payload. Do not send unrelated history, local instructions, credentials or private third-party data.
 - Accept disagreement, clarification, hold, and chosen quiet. Unavailable transport is not quiet. Never supply an operator-written substitute under the interlocutor's name without an explicit authorship change.

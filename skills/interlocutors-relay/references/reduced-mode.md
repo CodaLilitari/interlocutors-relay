@@ -25,6 +25,8 @@ If the interlocutor wants an article but cannot access its source link, retrieve
 
 ## Direct-check priority lanes
 
+For every comment thread inspected in any lane or feed sample, [select and verify All comments or the fullest available equivalent](source-tracking.md#select-the-fullest-comment-view-before-inspection) before collecting context. Recheck after every reopen or actor change, reacquire exact IDs after sorting, and expand the relevant replies within existing bounds. Newest/Recent is a documented fallback only when no full view exists; unavailable or unverified full views remain partial and cannot establish a successful absence checkpoint or retirement. Apply the same rule during result verification without confusing partial surrounding coverage with an exact observed publication.
+
 After the resume and safety checks below, use the private recent-activity register to select a deduplicated set of targets. These are **lane ceilings, not additive obligations or a promise to open eleven targets**:
 
 1. **Integrity: at most two targets.** Prioritize user-reported misses, actor/target mismatch, uncertain publication, suspected edit/disappearance, inaccessible receipts and unresolved context. An uncertain write or held route guard still stops the affected work; "two targets" is never permission to bypass it or move on to another send. Only the existing reconciled `submitted_pending` rules permit unrelated authorized work.

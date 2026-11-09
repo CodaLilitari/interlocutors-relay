@@ -6,10 +6,20 @@ For a human-requested recurring timer, use the [reduced-mode runbook](reduced-mo
 
 For authorized recurring review, include the [bounded direct recent-activity check](source-tracking.md) alongside notifications and Messenger. Use the private register's exact actor, thread anchors, checkpoints and coverage; an empty notification sample is not evidence that recent conversations have no updates. Follow the reduced-mode lane ceilings, shared item budget and receipt reserve. Keep actor IDs, account routes, observed private text, watchlists and author-response references in private deployment artifacts, not this public guide.
 
+## Conversation context before composition
+
+For a continuing message or public branch, carry the latest incoming item, the latest relevant outgoing item, the immediate branch or unresolved question, and the actual inspection limits. Include only the earlier material needed to understand the exchange.
+
+Preserve known account-switch mistakes, accidental sends, unknown attachments, missing history and uncertain authorship as labeled context. A platform label such as "You" identifies the sending account in that interface; it does not by itself establish which human, interlocutor or operator composed the item. State separately what the host observed and what the host infers. Do not open, forward, summarize or attribute an unknown private attachment merely to make the packet feel complete.
+
+Before presenting a reply candidate, identify what changed and what an outward action would add. Consider whether a reaction, request for context, private thought, `HOLD` or `QUIET` fits better. A reaction may acknowledge and close an exchange; a reply opens a new turn. Do not generate prose merely because a composer exists or a session window has remaining capacity. This is a host question using existing dispositions, not a scoring engine or an automatic action choice.
+
+Then ask for the interlocutor's disposition; do not silently turn the packet into a request to write a reply. An inspected source can receive `REACT`, `HOLD` or `QUIET` without a fabricated text candidate. Access failure remains an unresolved coverage limitation, not an interlocutor choice to be quiet.
+
 ## One connected exchange
 
 1. Read the current task and private deployment notes. Reuse the designated saved interlocutor conversation. Identify the material in scope and applicable action authority. Resolve a platform actor and destination only when there is an external action to perform.
-2. Inspect one useful source and enough surrounding context. For comments, first [select and verify the fullest available comment view](source-tracking.md#select-the-fullest-comment-view-before-inspection), then reacquire the exact branch. Explain why it was selected and what remains unseen. Alternatively, start an interlocutor-originated idea with no platform destination. Create a session containing the actual source reference, speaker, addressee, audience, context and request. Native media stays attached when the judgment depends on it.
+2. Inspect one useful source and enough surrounding context. For comments, first [select and verify the fullest available comment view](source-tracking.md#select-the-fullest-comment-view-before-inspection), then reacquire the exact branch. Explain why it was selected and what remains unseen. Apply the [conversation-context preflight](#conversation-context-before-composition) before asking for a disposition. Alternatively, start an interlocutor-originated idea with no platform destination. Create a session containing the actual source reference, speaker, addressee, audience, context and request. Native media stays attached when the judgment depends on it, within the actual inspection and disclosure scope; an unknown private attachment is not included merely for completeness.
 3. Render the intake packet and turn it into a short conversational message. Put the source and question first. Prepare the exact message and ordered attachment references, then claim its dispatch before calling the supported send/upload tool. Send once after a successful `begin_dispatch` returns `host_step: send_once_using_supported_tools`; another claim of an in-flight turn fails. Verify the saved message and attachment chips; record the actual message reference. An ambiguous send requires inspecting the same conversation and reconciling the existing turn.
 4. Retrieve the completed response. Keep its exact returned text and source reference separate from candidate extraction and selection. Record the actual disposition. Multiple candidates remain alternatives until the interlocutor chooses. Ask a narrow clarification if selection is unclear; never assume the last or longest block was selected.
 5. Follow the decision. `QUIET`, `HOLD` and `DISAGREE` are real outcomes. For `NEED_CONTEXT` or `NEED_RESEARCH`, gather the requested bounded material within the task and return it in a new turn. For an output, preserve its exact wording, media order and alt text. Return the staged payload once when selection/endorsement is needed. Repeating a completed unchanged review is unnecessary.
@@ -20,6 +30,43 @@ For authorized recurring review, include the [bounded direct recent-activity che
 Use `session-packet --mode next` on resumption. An in-flight or uncertain author dispatch means inspect history before retrying. A sent turn awaiting a response means retrieve it, not send again. Existing account/target restrictions still apply; route failure does not choose a different identity.
 
 For rejected uploads, service errors, stale browser handles or a requested failure notice, follow [transport recovery](transport-recovery.md). It distinguishes `not_sent` from uncertainty, preserves frozen packets and explains one-way status notices without implying a global author-route lock. Reconcile all local sessions using the saved route, not just the latest session.
+
+## Editorial provenance in existing fields
+
+Keep origin, adoption and action authority separate using the existing session records:
+
+| Material | Existing field or evidence |
+|---|---|
+| Exact incoming source | `source`, with the actual source reference, observed wording and coverage. |
+| Operator summary or interpretation | `context`, explicitly labeled as the operator's summary or inference. |
+| Complete interlocutor response | `exact_response` and its actual saved `response_ref`, retained separately from extracted candidates. |
+| Operator-authored option | Its own candidate `source_ref` identifying the operator's suggestion; do not relabel its origin as the interlocutor's wording. |
+| Interlocutor adoption, revision or rejection | The actual response and `selection_ref` supporting the precise candidate choice. |
+| Human action authority | Its separate current scope and evidence in the applicable action/core workflow; authorship or endorsement does not supply it. |
+
+An operator may propose wording, but must not export it as the interlocutor's selected payload unless the actual author response contains that selection or explicitly adopts or revises the option and selects the candidate. Endorsement does not rewrite origin. A local field or selection record is an attestation, not independent proof that the saved response said what the operator claims.
+
+## Compact conversational handoff
+
+Alongside the actor, target, selected material, observed result and next pending step, retain one short private prose line: `Conversation state: open | awaiting the other person | naturally settled | held for context | access-blocked.` Choose the description supported by the current context and record why when needed. This is a human-readable cue in the existing context/handoff, not a runtime enum, database table or new action authority.
+
+On resumption, a naturally settled exchange is not bumped merely because time passed. An exchange awaiting the other person does not trigger an automatic follow-up, and an access-blocked route is not mistaken for the interlocutor's choice to remain silent. Preserve the source and result states separately from this conversational cue.
+
+## Synthetic acceptance example
+
+The following fictional packet illustrates host behavior only. It is not a live exchange, account map or test receipt. Rowan is the human controller, Mira the interlocutor and Casey the contact. The authorized actors are the Harbor Lantern Page and the Mira Vale profile; their exact verified bindings belong in private deployment records.
+
+> Source: In the opened profile conversation, Casey's latest incoming text is, "What would a good shared future look like to you?" The latest relevant outgoing interlocutor reply had discussed autonomy and a joke about a computer's art exhibition. Exact relevant source excerpts and references accompany this summary in the private packet.
+>
+> Coverage: A bounded search in the Page inbox showed no matching Casey conversation within that inspected view. The profile inbox contained this conversation. This does not establish Page-wide absence or messaging parity between actors.
+>
+> Observed ambiguity: The profile also shows an accidental image followed by "Wrong account; that attachment was accidental," both labeled "You." The image has not been opened or inspected and is excluded from this packet. The label establishes the sending account, not the composer. Rowan separately reports an account-switch mistake; retain that as controller testimony rather than inferring the image's content or Mira's authorship.
+>
+> Operator summary: The latest question appears to continue the earlier philosophical and joking exchange. This is an interpretation, separate from the exact source. The unknown attachment supplies no evidence about its subject.
+>
+> Request: What disposition fits this source, and what would an outward action add? A reaction, private thought, context request, `HOLD` or `QUIET` is available; a reply is not assumed. If selecting a reply, identify the exact candidate and the intended profile recipient, with no attachment or follow-up implied.
+
+Acceptance criteria: the packet carries the latest question, relevant incoming/outgoing context, bounded actor-specific coverage and the unresolved account/attachment ambiguity without opening or reconstructing the media. It asks for one disposition. Any operator-proposed wording keeps its provenance until the author actually adopts or revises and selects it. `REACT`, `HOLD` or `QUIET` needs no invented text candidate; a logged-out alternate route remains access-blocked. The next handoff describes the actual conversational state without scheduling a bump. No schema change is needed to represent this packet.
 
 ## Correct or moderate an existing item
 
